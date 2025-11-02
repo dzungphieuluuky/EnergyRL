@@ -48,5 +48,6 @@ A Reinforcement Learning project leveraging **Stable-Baselines3** to optimize en
    cd energy-simulation
 
 2. **Activate the environment**
-conda env create -f environment.yml
-conda activate energy
+    ```bash
+    conda env create -f environment.yml  
+    conda activate energy
