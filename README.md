@@ -15,8 +15,6 @@ A Reinforcement Learning project leveraging **Stable-Baselines3** to optimize en
 ---
 
 ## 🏗️ Project Structure
-*This is the core layout of the repository:*
-## 🏗️ Project Structure
 *A high-level overview of the project's file and directory structure.*
 
 | File/Directory | Type | Description |

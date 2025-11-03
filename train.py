@@ -266,9 +266,12 @@ if __name__ == "__main__":
     constraint_monitor_callback = ConstraintMonitorCallback()
     eval_env = VecNormalize(SubprocVecEnv([make_env_thunk(scenario_configs[0], MAX_CELLS_SYSTEM_WIDE, seed=99)]), training=False, norm_reward=False)
     eval_callback = EvalCallback(
-        eval_env, best_model_save_path=os.path.join(model_dir, f"best_model_{algorithm}"),
-        log_path=log_dir, eval_freq=max(25000 // NUM_CPU_CORES, 1),
-        deterministic=True, render=False
+        eval_env, 
+        best_model_save_path=os.path.join(model_dir, f"best_model_{algorithm}"),
+        log_path=log_dir, 
+        eval_freq=max(25000 // NUM_CPU_CORES, 1),
+        deterministic=True, 
+        render=False
     )
     
     print(f"\n{'='*60}\n--- TRAINING {algorithm.upper()} FOR {total_timesteps:,} TIMESTEPS ---\n{'='*60}")

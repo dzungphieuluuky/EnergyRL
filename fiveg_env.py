@@ -373,17 +373,53 @@ class FiveGEnv(gym.Env):
             energy_efficiency = 1.0 - energy_ratio
             
             # Energy score only kicks in after sustained compliance
-            MIN_COMPLIANT_STEPS = 10
+            MIN_COMPLIANT_STEPS = 20
             if self.qos_compliant_steps >= MIN_COMPLIANT_STEPS:
-                # Gradually unlock: 10 steps→25%, 20→50%, 40+→100%
-                unlock_ratio = min(1.0, (self.qos_compliant_steps - MIN_COMPLIANT_STEPS) / 30.0)
+                # Step unlock: must maintain streak
+                step_unlock = min(1.0, (self.qos_compliant_steps - MIN_COMPLIANT_STEPS) / 80.0)
+                # Episode unlock: curriculum stages
+                if self.total_episodes < 300:
+                    episode_unlock = 0.0  # Learn constraints only
+                elif self.total_episodes < 800:
+                    episode_unlock = 0.5 * (self.total_episodes - 100) / 200.0
+                elif self.total_episodes < 1300:
+                    episode_unlock = 0.5 + 0.5 * (self.total_episodes - 300) / 300.0
+                else:
+                    episode_unlock = 1.0
+                
+                unlock_ratio = step_unlock * episode_unlock
                 energy_reward = 2.0 * energy_efficiency * unlock_ratio
             else:
                 energy_reward = 0.0
         else:
             energy_reward = 0.0
             energy_efficiency = 0.0
+
+        avg_power = np.mean([c.txPower for c in self.cells])
+        power_ratio = (avg_power - self.config['minTxPower']) / \
+                    (self.config['maxTxPower'] - self.config['minTxPower'])
         
+        if self.total_episodes < 150:
+            # Phase 1: Guide toward HIGH power (0.75-0.95)
+            if 0.75 <= power_ratio <= 0.95:
+                power_guidance = 0.3  # Bonus for safe range
+            elif power_ratio > 0.95:
+                power_guidance = 0.15  # Small bonus for very high
+            else:
+                power_guidance = -0.4 * (0.75 - power_ratio)  # Penalty for too low
+                
+        elif self.total_episodes < 400:
+            # Phase 2: Neutral, let agent explore
+            power_guidance = 0.0
+        else:
+            # Phase 3: Guide toward LOWER power (0.5-0.7)
+            if 0.5 <= power_ratio <= 0.7:
+                power_guidance = 0.25  # Bonus for efficient range
+            elif power_ratio < 0.5:
+                power_guidance = 0.0  # No bonus for risky low power
+            else:
+                power_guidance = -0.1 * (power_ratio - 0.7)  # Small penalty for high
+
         # 3.4 Resource Efficiency
         cpu_violations = metrics.get("cpuViolations", 0)
         prb_violations = metrics.get("prbViolations", 0)
@@ -439,7 +475,8 @@ class FiveGEnv(gym.Env):
             resource_reward +              # up to 0.3
             load_balance_reward +          # up to 0.2
             sinr_reward +                  # up to 0.2
-            stability_reward               # up to 0.1
+            stability_reward +
+            power_guidance                  # up to 0.1
         )
         # Theoretical max: 1.0 + 0.5 + 2.0 + 0.3 + 0.2 + 0.2 + 0.1 = 4.3
         
@@ -497,7 +534,19 @@ class FiveGEnv(gym.Env):
                 'stability_reward': stability_reward,
                 'streak_bonus': streak_bonus,
                 'efficiency_bonus': efficiency_bonus,
-                'perfection_bonus': perfection_bonus
+                'perfection_bonus': perfection_bonus,
+                'power_guidance': power_guidance,
+                'energy_unlock': unlock_ratio if 'unlock_ratio' in locals() else 0.0,
+                'step_unlock': step_unlock if 'step_unlock' in locals() else 0.0,
+                'episode_unlock': episode_unlock if 'episode_unlock' in locals() else 0.0
+            },
+            'curriculum': {
+                'phase': 1 if self.total_episodes < 150 else (2 if self.total_episodes < 400 else 3),
+                'avg_power': avg_power,
+                'power_ratio': power_ratio,
+                'target_power_range': '[0.75-0.95]' if self.total_episodes < 150 else (
+                    '[explore]' if self.total_episodes < 400 else '[0.5-0.7]'
+                )
             },
             'quality_scores': {
                 'drop_quality': drop_quality,
@@ -545,7 +594,7 @@ class FiveGEnv(gym.Env):
         metrics['constraints_satisfied'] = reward_info['constraints_satisfied']
         
         # Periodic detailed logging
-        if self.current_step % 50 == 0 or self.current_step == 0:
+        if self.current_step % 100 == 0 or self.current_step == 0:
             status = "✅ COMPLIANT" if reward_info['constraints_satisfied'] else "❌ VIOLATED"
             print(f"\n[Step {self.current_step}] {status}")
             print(f"  Drop: {reward_info['metrics']['avg_drop_rate']:.3f}% (threshold: {self.config['dropCallThreshold']:.1f}%)")
@@ -553,6 +602,17 @@ class FiveGEnv(gym.Env):
             print(f"  Connection: {reward_info['metrics']['connection_rate_pct']:.1f}% (threshold: 95.0%)")
             print(f"  Compliant streak: {reward_info['metrics']['qos_compliant_steps']}")
             
+            avg_power = np.mean([c.txPower for c in self.cells])
+            phase = reward_info['curriculum']['phase']
+            
+            print(f"\n[Episode {self.total_episodes}, Step {self.current_step}]")
+            print(f"  Phase: {phase} - {reward_info['curriculum']['target_power_range']}")
+            print(f"  Avg power: {avg_power:.2f} dBm (ratio: {reward_info['curriculum']['power_ratio']:.2f})")
+            print(f"  Energy unlock: {100*reward_info['components']['energy_unlock']:.0f}%")
+            print(f"  Power guidance: {reward_info['components']['power_guidance']:+.3f}")
+            print(f"  Compliance: {reward_info['constraints_satisfied']}")
+
+
             if reward_info['constraints_satisfied']:
                 print(f"  Energy unlocked: {100*reward_info['metrics']['energy_unlock_ratio']:.0f}%")
                 print(f"  Reward components:")
