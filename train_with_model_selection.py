@@ -150,12 +150,11 @@ if __name__ == "__main__":
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     MAX_CELLS_SYSTEM_WIDE = 57
     num_cpu = 5
-    
     print(f"Using device: {device}")
     print(f"Max cells: {MAX_CELLS_SYSTEM_WIDE}, Parallel envs: {num_cpu}")
 
     # --- Load Scenarios ---
-    scenario_folder = "/kaggle/input/my-energy-simulation/scenarios"
+    scenario_folder = "scenarios/"
     scenario_files = [f for f in os.listdir(scenario_folder) if f.endswith('.json')]
     scenario_configs = []
     
@@ -198,8 +197,8 @@ if __name__ == "__main__":
     print(f"\nSelected algorithm: {algorithm.upper()}")
 
     # --- Training Setup ---
-    log_dir = "/kaggle/input/my-energy-simulation/sb3_logs/"
-    model_dir = "/kaggle/input/my-energy-simulation/sb3_models/"
+    log_dir = "sb3_logs/"
+    model_dir = "sb3_models/"
     os.makedirs(log_dir, exist_ok=True)
     os.makedirs(model_dir, exist_ok=True)
 
@@ -279,10 +278,12 @@ if __name__ == "__main__":
         total_timesteps = 1_000_000
 
     kaggle_save_path = "/kaggle/working/"
+    save_path = os.path.join(model_dir, 'checkpoints/')
+    os.makedirs(save_path, exist_ok=True)
     run_name_prefix = f"{algorithm}_mixed_{pd.Timestamp.now().strftime('%Y%m%d_%H%M')}"
     checkpoint_callback = CheckpointCallback(
         save_freq=max(50000 // num_cpu, 1), 
-        save_path=kaggle_save_path, 
+        save_path=save_path, 
         name_prefix=run_name_prefix, 
         verbose=1
     )

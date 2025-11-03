@@ -144,7 +144,6 @@ def main(args):
             callback=checkpoint_callback,
             progress_bar=True,
             reset_num_timesteps=True,
-            tb_log_name=run_name_prefix
         )
     finally:
         # --- 8. Save Final Model and Env Stats ---
