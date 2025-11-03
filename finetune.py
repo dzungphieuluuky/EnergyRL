@@ -79,13 +79,15 @@ def main(args):
     print("\nAvailable PPO model checkpoints to fine-tune:")
     for f in sorted(os.listdir(model_dir)):
         if f.endswith('.zip'): print(f"  - {f}")
-    model_path_name = input("Enter path to PPO model checkpoint file: ").strip()
+    # model_path_name = input("Enter path to PPO model checkpoint file: ").strip()
+    model_path_name = "ppo_mixed_20251102_2300_2357040_steps.zip"  # For automated testing
     model_full_path = os.path.join(model_dir, model_path_name)
 
     print("\nAvailable normalization stats files:")
     for f in sorted(os.listdir(model_dir)):
         if f.endswith('.pkl'): print(f"  - {f}")
-    env_path_name = input("Enter path to VecNormalize stats file: ").strip()
+    # env_path_name = input("Enter path to VecNormalize stats file: ").strip()
+    env_path_name = "vec_normalize_20251102_190846.pkl"  # For automated testing
     stats_full_path = os.path.join(model_dir, env_path_name)
 
     # --- 4. Load Normalization Stats ---
