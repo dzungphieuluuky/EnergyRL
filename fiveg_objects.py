@@ -1,53 +1,210 @@
 # fiveg_objects.py
 import numpy as np
 from typing import List, Dict, Any, Optional
+from dataclasses import dataclass, field
+
+# --- Data Classes for Simulation Events and Measurements ---
+
+@dataclass
+class NeighborMeasurement:
+    """Represents a measurement of a neighbor cell."""
+    cell_id: int
+    rsrp: float
+    rsrq: float
+    sinr: float
+
+@dataclass
+class HandoverEvent:
+    """Logs the details of a handover attempt."""
+    ue_id: int
+    cell_source: int
+    cell_target: int
+    rsrp_source: float
+    rsrp_target: float
+    rsrq_source: float
+    rsrq_target: float
+    sinr_source: float
+    sinr_target: float
+    a3_offset: float
+    ttt: float
+    ho_success: bool
+    timestamp: float
+
+# --- Core Simulation Objects ---
+
 class UE:
-    """Represents a User Equipment in the simulation."""
-    def __init__(self, params: Dict[str, Any]):
+    """Represents a User Equipment in the simulation. Attributes are a 1:1 match with the MATLAB struct."""
+    def __init__(self, **params: Dict[str, Any]):
+        # Core Properties
         self.id: int = int(params['id'])
         self.x: float = float(params['x'])
         self.y: float = float(params['y'])
         self.velocity: float = float(params.get('velocity', 0.0))
         self.direction: float = float(params.get('direction', 0.0))
-        self.servingCell: Optional[int] = None
+        self.mobility_pattern: str = params.get('mobility_pattern', 'pedestrian')
+        self.deployment_scenario: str = params.get('deployment_scenario', 'dense_urban')
+
+        # Network State
+        self.serving_cell: Optional[int] = None
         self.rsrp: float = np.nan
         self.rsrq: float = np.nan
         self.sinr: float = np.nan
-        self.trafficDemand: float = 0.0
-        self.pauseTimer: float = 0.0
-        self.lastDirectionChange: float = 0.0
-        self.sessionActive: bool = True
-        self.mobilityPattern: str = params.get('mobilityPattern', 'pedestrian')
-        self.rngS: int = int(params.get('rngS', 42))
+        self.throughput: float = 0.0
+        self.neighbor_measurements: List[NeighborMeasurement] = []
+
+        # Traffic & QoS State
+        self.traffic_demand: float = 0.0
+        self.is_dropped: bool = False
+        self.drop_count: int = 0
+        self.session_active: bool = False
+        
+        # Handover State
+        self.ho_timer: float = 0.0
+        self.handover_history: List[HandoverEvent] = []
+        
+        # Connection State Timers
+        self.disconnection_timer: float = 0.0
+        self.connection_timer: float = 0.0
+
+        # Internal Mobility State
+        self.pause_timer: float = 0.0
+        self.rng_seed: int = int(params.get('rng_seed', 42))
+        self.step_counter: int = 0
+        self.last_direction_change: float = 0.0
+
         # Scenario-specific attributes
-        self.inTrain: bool = False
-        self.trainStartX: float = 0.0
-        self.trackLength: float = 0.0
-        self.positionInTrain: float = 0.0
+        self.in_train: bool = params.get('in_train', False)
+        self.track_length: float = params.get('track_length', 0.0)
+        self.train_start_x: float = params.get('train_start_x', 0.0)
+        self.position_in_train: float = params.get('position_in_train', 0.0)
+        
+        self.on_highway: bool = params.get('on_highway', False)
+        self.highway_length: float = params.get('highway_length', 0.0)
+        self.num_lanes: int = params.get('num_lanes', 3)
+        self.lane_width: float = params.get('lane_width', 3.5)
+        self.lane: int = params.get('lane', 1)
+        self.is_forward: bool = params.get('is_forward', True)
 
 class Cell:
-    """Represents a network cell in the simulation."""
-    def __init__(self, params: Dict[str, Any]):
+    """Represents a network cell in the simulation. Attributes are a 1:1 match with the MATLAB struct."""
+    def __init__(self, **params: Dict[str, Any]):
+        # Core Properties
         self.id: int = int(params['id'])
-        self.siteId: int = int(params['siteId'])
-        self.sectorId: int = int(params['sectorId'])
+        self.site_id: int = int(params['site_id'])
+        self.sector_id: int = int(params['sector_id'])
         self.x: float = float(params['x'])
         self.y: float = float(params['y'])
         self.frequency: float = float(params.get('frequency', 3.5e9))
-        self.txPower: float = float(params.get('txPower', 46.0))
-        self.minTxPower: float = float(params.get('minTxPower', 30.0))
-        self.maxTxPower: float = float(params.get('maxTxPower', 46.0))
-        self.baseEnergyConsumption: float = float(params.get('baseEnergyConsumption', 1000.0))
-        self.idleEnergyConsumption: float = float(params.get('idleEnergyConsumption', 250.0))
-        self.maxCapacity: float = float(params.get('maxCapacity', 250.0))
-        self.ttt: float = float(params.get('ttt', 8.0))
-        self.a3Offset: float = float(params.get('a3Offset', 8.0))
-        # Dynamic attributes
-        self.cpuUsage: float = 0.0
-        self.prbUsage: float = 0.0
-        self.currentLoad: float = 0.0
-        self.energyConsumption: float = self.baseEnergyConsumption
-        self.dropRate: float = 0.0
-        self.avgLatency: float = 0.0
-        self.connectedUEs: List[UE] = []
-        self.power_ratio: float = 1.0
+        self.azimuth: float = float(params.get('azimuth', 0.0))
+        self.antenna_height: float = float(params.get('antenna_height', 25.0))
+        self.is_omnidirectional: bool = bool(params.get('is_omnidirectional', False))
+        self.site_type: str = str(params.get('site_type', 'macro'))
+        
+        # Power Properties
+        self.tx_power: float = float(params.get('tx_power', 46.0))
+        self.min_tx_power: float = float(params.get('min_tx_power', 30.0))
+        self.max_tx_power: float = float(params.get('max_tx_power', 46.0))
+        
+        # Energy Properties
+        self.base_energy_consumption: float = float(params.get('base_energy_consumption', 1000.0))
+        self.idle_energy_consumption: float = float(params.get('idle_energy_consumption', 250.0))
+        self.energy_consumption: float = self.base_energy_consumption
+
+        # Capacity & Load
+        self.max_capacity: float = float(params.get('max_capacity', 250.0))
+        self.current_load: float = 0.0
+        
+        # Handover Parameters
+        self.ttt: float = float(params.get('ttt', 0.1)) # Time To Trigger in seconds
+        self.a3_offset: float = float(params.get('a3_offset', 3.0)) # A3 Handover Offset in dB
+
+        # Dynamic Metrics
+        self.cpu_usage: float = 0.0
+        self.prb_usage: float = 0.0
+        self.avg_latency: float = 0.0
+        self.connected_ues: List[int] = []
+        self.avg_sinr: float = 0.0
+
+        # QoS Tracking
+        self.droppedUEs: int = 0
+        self.totalUEsServed: int = 0
+        self.actual_drop_count: int = 0
+        self.total_connection_time: int = 0
+        self.total_drop_events: int = 0
+        self.theoretical_drop_rate: float = 0.0
+        self.drop_rate: float = 0.0
+
+@dataclass
+class Site:
+    """Represents a physical site location which can host multiple cells."""
+    id: int
+    x: float
+    y: float
+    type: str
+
+@dataclass
+class SimulationParams:
+    """Manages all simulation parameters, loaded from scenario configs."""
+    name: str = "default"
+    description: str = "Default simulation scenario"
+    deploymentScenario: str = "urban_macro"
+    layout: str = "hexagonal_grid"
+    
+    # Network Topology
+    numSites: int = 7
+    numSectors: int = 3
+    isd: float = 200.0
+    antennaHeight: float = 25.0
+    cellRadius: float = 200.0
+    max_radius: float = 500.0 # Used for UE placement, not in JSON
+    
+    # RF Parameters
+    carrierFrequency: float = 3.5e9
+    systemBandwidth: float = 100e6
+    
+    # User Parameters
+    numUEs: int = 210
+    userDistribution: str = "Uniform/macro"
+    ueSpeed: float = 3.0
+    indoorRatio: float = 0.8
+    outdoorSpeed: float = 30.0
+    
+    # High-Speed Scenario
+    trainLength: float = 200.0
+    trackLength: float = 10000.0
+    
+    # Highway Scenario
+    highway_length: float = 10000.0 # Internal name
+    num_lanes: int = 3 # Internal name
+    lane_width: float = 3.5 # Internal name
+    
+    # Power Parameters
+    minTxPower: float = 30.0
+    maxTxPower: float = 46.0
+    basePower: float = 800.0
+    idlePower: float = 200.0
+    
+    # Simulation Time
+    simTime: float = 600.0
+    timeStep: float = 1.0
+    
+    # Thresholds & Triggers
+    rsrpServingThreshold: float = -110.0
+    rsrpTargetThreshold: float = -100.0
+    rsrpMeasurementThreshold: float = -115.0
+    dropCallThreshold: float = 1.0
+    latencyThreshold: float = 50.0
+    cpuThreshold: float = 80.0
+    prbThreshold: float = 80.0
+    
+    # Traffic Model
+    trafficLambda: float = 30.0
+    peakHourMultiplier: float = 1.5
+    
+    # Derived Parameters
+    total_steps: int = 600
+    expected_cells: int = 21
+
+    def __post_init__(self):
+        self.total_steps = int(self.simTime / self.timeStep)
+        self.expected_cells = self.numSites * self.numSectors

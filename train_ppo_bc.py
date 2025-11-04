@@ -3,16 +3,17 @@ import numpy as np
 import torch
 import pickle
 import os
+import random
+import json
 from stable_baselines3 import PPO
 from stable_baselines3.common.vec_env import VecNormalize, SubprocVecEnv, DummyVecEnv
 from stable_baselines3.common.callbacks import CheckpointCallback, EvalCallback
 from stable_baselines3.common.utils import obs_as_tensor
 from stable_baselines3.common.monitor import Monitor
-import gymnasium as gym
 
 from fiveg_env import FiveGEnv
 
-# Note: The BehavioralCloningLogger is good as-is.
+# Note: The BehavioralCloningLogger and SafeBehavioralCurriculum classes are good as-is.
 
 class SafeBehavioralCurriculum:
     """
@@ -21,8 +22,8 @@ class SafeBehavioralCurriculum:
     REFINED VERSION.
     """
     def __init__(self, action_dim, 
-                 initial_range=(0.9, 1.0),
-                 final_range=(0.4, 0.7),
+                 initial_range=(0.75, 0.8),
+                 final_range=(0.5, 0.75),
                  hold_episodes=50,
                  compliance_threshold=0.98,
                  patience_to_advance=15,
@@ -60,10 +61,9 @@ class SafeBehavioralCurriculum:
 
         if self.consecutive_compliant >= self.patience_to_advance:
             if self.current_high > self.final_high:
-                # --- FIX 2: Incremental, not absolute, progression ---
                 self.current_low = max(self.current_low - self.progression_step, self.final_low)
                 self.current_high = max(self.current_high - self.progression_step, self.final_high)
-                self.consecutive_compliant = 0  # Reset patience after progressing
+                self.consecutive_compliant = 0
                 print(f"🎓 CURRICULUM ADVANCED! New Power: [{self.current_low:.3f}, {self.current_high:.3f}]")
                 return {'status': 'ADVANCED', 'reason': 'Patience met'}
             else:
@@ -82,74 +82,93 @@ class SafeBehavioralCurriculum:
     def sample_action(self):
         return np.random.uniform(self.current_low, self.current_high, size=self.action_dim)
 
-def create_training_env(config, n_envs=4, is_eval=False):
-    """Creates and wraps the training environment."""
+def load_scenario_configs(scenario_folder: str) -> list:
+    """Loads all .json configuration files from a given folder."""
+    if not os.path.isdir(scenario_folder):
+        raise FileNotFoundError(f"Scenario folder not found: {scenario_folder}")
+    
+    config_paths = [os.path.join(scenario_folder, f) for f in os.listdir(scenario_folder) if f.endswith('.json')]
+    if not config_paths:
+        raise FileNotFoundError(f"No .json scenario files found in '{scenario_folder}'")
+        
+    configs = []
+    print("\n--- Loading Scenario Configurations ---")
+    for path in sorted(config_paths):
+        with open(path, 'r') as f:
+            config = json.load(f)
+            config['name'] = config.get('name', os.path.basename(path))
+            configs.append(config)
+            print(f"  - Loaded '{config['name']}'")
+    print("-------------------------------------\n")
+    return configs
+
+
+def create_training_env(configs: list, n_envs=4, is_eval=False):
+    """Creates a vectorized environment that cycles through the provided configs."""
     def make_env(rank):
         def _init():
-            env_conf = config.copy()
-            env_conf['seed'] = config.get('seed', 42) + rank
-            env = FiveGEnv(env_conf)
+            config_for_this_env = configs[rank % len(configs)].copy()
+            config_for_this_env['seed'] = config_for_this_env.get('seed', 42) + rank
+            
+            env = FiveGEnv(config_for_this_env)
             env = Monitor(env)
             return env
         return _init
     
-    if n_envs > 1 and not is_eval: # Use SubprocVecEnv for parallel training
-        env = SubprocVecEnv([make_env(i) for i in range(n_envs)])
-    else: # Use DummyVecEnv for data generation, eval, or single-core training
-        env = DummyVecEnv([make_env(0)])
+    vec_env_cls = DummyVecEnv if n_envs == 1 else SubprocVecEnv
+    env = vec_env_cls([make_env(i) for i in range(n_envs)])
     
+    # We will normalize the reward only for the training environment
     norm_reward = not is_eval
     env = VecNormalize(env, norm_obs=True, norm_reward=norm_reward, clip_obs=10., gamma=0.99)
     return env
 
-def generate_expert_dataset(config, behavioral_policy, num_episodes=150):
+def generate_expert_dataset(configs: list, behavioral_policy, num_episodes_per_config=50):
     """
-    Generate expert dataset using a SINGLE, non-parallel env for correctness and simplicity.
+    Generates a mixed expert dataset using unnormalized environments.
     """
-    print(f"\n{'='*70}\nGENERATING EXPERT DATASET (Single Environment)\n{'='*70}")
-    
-    # --- FIX 1: Use a single, temporary environment for clean data generation ---
-    temp_env = Monitor(FiveGEnv(config))
+    print(f"\n{'='*70}\nGENERATING MIXED EXPERT DATASET\n{'='*70}")
     
     expert_observations = []
     expert_actions = []
     
-    for ep in range(num_episodes):
-        obs, _ = temp_env.reset()
-        done = False
-        compliant_steps = 0
-        total_steps = 0
-        while not done:
-            action = behavioral_policy.sample_action()
-            next_obs, reward, terminated, truncated, info = temp_env.step(action)
-            done = terminated or truncated
+    total_episodes = num_episodes_per_config * len(configs)
+    current_episode = 0
+
+    for config in configs:
+        print(f"\n--- Generating data for scenario: {config.get('name', 'N/A')} ---")
+        # CRITICAL: Use a simple, unnormalized Monitor env for data generation
+        temp_env = Monitor(FiveGEnv(config))
+        
+        for ep in range(num_episodes_per_config):
+            obs, _ = temp_env.reset()
+            done = False
+            while not done:
+                action = behavioral_policy.sample_action()
+                next_obs, reward, terminated, truncated, info = temp_env.step(action)
+                done = terminated or truncated
+                
+                expert_observations.append(obs)
+                expert_actions.append(action)
+                obs = next_obs
             
-            expert_observations.append(obs)
-            expert_actions.append(action)
-            
-            if info.get('reward_info', {}).get('constraints_satisfied', False):
-                compliant_steps += 1
-            total_steps += 1
-            obs = next_obs
+            current_episode += 1
+            if (ep + 1) % 10 == 0:
+                print(f"  Episode {ep+1}/{num_episodes_per_config} complete. "
+                      f"Total progress: {current_episode}/{total_episodes} episodes.")
+    
+    temp_env.close()
+    print(f"\n✅ Mixed dataset generation complete. Total samples: {len(expert_actions)}\n")
+    return np.array(expert_observations), np.array(expert_actions)
 
-        compliance_rate = compliant_steps / total_steps if total_steps > 0 else 0
-        behavioral_policy.update_curriculum(compliance_rate)
 
-        if (ep + 1) % 10 == 0:
-            low, high = behavioral_policy.current_low, behavioral_policy.current_high
-            print(f"Episode {ep+1}/{num_episodes} | Compliance: {compliance_rate:.1%} | Power Range: [{low:.3f}, {high:.3f}]")
-
-    print(f"\n✅ Dataset generation complete. Total samples: {len(expert_actions)}\n")
-    return np.array(expert_observations), np.array(expert_actions), behavioral_policy
-
-def pretrain_with_behavioral_cloning(model, observations, actions, epochs=25, 
-                                   batch_size=256, validation_split=0.15):
+def pretrain_with_behavioral_cloning(model, observations: np.array, actions: np.array, epochs: int = 25, 
+                                   batch_size: int = 256, validation_split: float = 0.15):
     """
     Enhanced behavioral cloning with correct shuffling, validation, and early stopping.
     """
     print(f"\n{'='*70}\nBEHAVIORAL CLONING PRE-TRAINING\n{'='*70}")
     
-    # --- FIX 3: Shuffle data BEFORE splitting to prevent data leakage ---
     indices = np.random.permutation(len(observations))
     shuffled_obs = observations[indices]
     shuffled_acts = actions[indices]
@@ -189,8 +208,7 @@ def pretrain_with_behavioral_cloning(model, observations, actions, epochs=25,
         with torch.no_grad():
             val_obs_tensor = obs_as_tensor(val_obs, model.device)
             val_acts_tensor = torch.tensor(val_acts, dtype=torch.float32, device=model.device)
-            val_distribution = model.policy.get_distribution(val_obs_tensor)
-            val_log_prob = val_distribution.log_prob(val_acts_tensor)
+            _, val_log_prob, _ = model.policy.evaluate_actions(val_obs_tensor, val_acts_tensor)
             val_loss = -torch.mean(val_log_prob).item()
         
         print(f"BC Epoch {epoch+1}/{epochs}: Train Loss = {avg_train_loss:.4f}, Val Loss = {val_loss:.4f}")
@@ -209,75 +227,96 @@ def pretrain_with_behavioral_cloning(model, observations, actions, epochs=25,
 
 def main():
     # --- 1. Configuration ---
-    TOTAL_TIMESTEPS = 1_000_000
-    PRETRAIN_EPISODES = 150
-    PRETRAIN_EPOCHS = 30 # Increased for more robust cloning
-    N_ENVS = 8
+    TOTAL_TIMESTEPS = 1_500_000
+    PRETRAIN_EPISODES_PER_CONFIG = 100
+    PRETRAIN_EPOCHS = 50
+    N_ENVS = 9
+    SCENARIO_FOLDER = "scenarios"
     
-    config = {'simTime': 500, 'timeStep': 1, 'numSites': 4, 'numUEs': 100}
+    os.makedirs('sb3_models', exist_ok=True); 
+    os.makedirs('expert_data', exist_ok=True)
     
-    os.makedirs('sb3_models', exist_ok=True); os.makedirs('expert_data', exist_ok=True)
-    
-    # --- 2. Phase 1: Generate Expert Dataset ---
-    behavioral_policy = SafeBehavioralCurriculum(action_dim=FiveGEnv(config).action_space.shape[0])
-    expert_obs, expert_acts, adapted_policy = generate_expert_dataset(config, behavioral_policy, num_episodes=PRETRAIN_EPISODES)
-    
-    with open('expert_data/expert_data.pkl', 'wb') as f:
-        pickle.dump({'observations': expert_obs, 'actions': expert_acts, 'policy_state': adapted_policy}, f)
-    
-    # --- 3. Environment Setup for Training ---
-    print("\nInitializing parallel environments for PPO training...")
-    env = create_training_env(config, n_envs=N_ENVS)
-    
-    # --- 4. Normalize Expert Data ---
-    print("Normalizing expert data using training environment statistics...")
-    normalized_expert_obs = env.normalize_obs(expert_obs)
+    # --- 2. Load All Scenario Configs ---
+    try:
+        scenario_configs = load_scenario_configs(SCENARIO_FOLDER)
+    except FileNotFoundError as e:
+        print(f"FATAL ERROR: {e}"); return
 
-    # --- 5. Initialize PPO Model ---
-    model = PPO(
-        "MlpPolicy",
-        env,
-        learning_rate=2.5e-4, # Slightly lower for stability with large batches
-        n_steps=2048,       # --- FIX 5: Keep n_steps high for stability ---
-        batch_size=64,
-        n_epochs=10,
-        gamma=0.99,
-        gae_lambda=0.95,
-        clip_range=0.2,
-        ent_coef=0.005,
-        verbose=1,
-        tensorboard_log="sb3_logs/PPO_BC/",
-        policy_kwargs=dict(net_arch=dict(pi=[256, 256], vf=[256, 256]))
+    # --- 3. Generate Expert Dataset ---
+    temp_env_for_dims = FiveGEnv(scenario_configs[0])
+    behavioral_policy = SafeBehavioralCurriculum(action_dim=temp_env_for_dims.action_space.shape[0])
+    del temp_env_for_dims
+
+    expert_obs, expert_acts = generate_expert_dataset(
+        scenario_configs, behavioral_policy, num_episodes_per_config=PRETRAIN_EPISODES_PER_CONFIG
     )
     
-    # --- 6. Phase 2: Behavioral Cloning ---
+    with open('expert_data/mixed_expert_data.pkl', 'wb') as f:
+        pickle.dump({'observations': expert_obs, 'actions': expert_acts}, f)
+        
+    # --- 4. Create the Final Training and Evaluation Environments ---
+    print("\nInitializing normalized, parallel environments for PPO training...")
+    env = create_training_env(scenario_configs, n_envs=N_ENVS)
+    
+    # The evaluation env should use the same normalization stats as the training env
+    print("Initializing normalized evaluation environment...")
+    eval_env = create_training_env([scenario_configs[0]], n_envs=1, is_eval=True)
+
+    # --- 5. CRITICAL: Normalize Expert Data Using Training Env Statistics ---
+    print("Normalizing expert data using the training environment's statistics...")
+    # This step is vital. It ensures the BC pre-training sees data in the same
+    # format that the RL agent will see during fine-tuning.
+    normalized_expert_obs = env.normalize_obs(expert_obs)
+
+    # --- 6. Initialize PPO Model ---
+    model = PPO(
+        "MlpPolicy", env,
+        learning_rate=3e-4, # Standard learning rate for BC pre-training
+        n_steps=2048, batch_size=64, n_epochs=10, gamma=0.99, gae_lambda=0.95,
+        clip_range=0.2, ent_coef=0.01, # Standard entropy for BC
+        verbose=1, tensorboard_log="sb3_logs/PPO_MixedBC/",
+        policy_kwargs=dict(net_arch=dict(pi=[256, 256], vf=[256, 256])),
+        device="cuda" if torch.cuda.is_available() else "cpu"
+    )
+    
+    # --- 7. Phase 2: Behavioral Cloning on NORMALIZED Mixed Data ---
     pretrain_with_behavioral_cloning(
         model, normalized_expert_obs, expert_acts, epochs=PRETRAIN_EPOCHS
     )
     
-    # --- 7. Phase 3: Reinforcement Learning ---
+    # --- 8. Phase 3: Reinforcement Learning Fine-Tuning ---
     print(f"\n{'='*70}\nSTARTING REINFORCEMENT LEARNING FINE-TUNING\n{'='*70}")
     
-    eval_env = create_training_env(config, n_envs=1, is_eval=True)
+    # *** CRITICAL FIX: Transfer normalization stats to the eval env ***
+    # This ensures that evaluation is performed on the same scale as training.
+    eval_env.obs_rms = env.obs_rms
+    eval_env.ret_rms = env.ret_rms
+    
     eval_callback = EvalCallback(
-        eval_env, best_model_save_path='sb3_models/best_model/',
-        log_path='sb3_logs/PPO_BC/', eval_freq=max(10000 // N_ENVS, 1)
+        eval_env, best_model_save_path='sb3_models/best_mixed_model/',
+        log_path='sb3_logs/PPO_BC/', eval_freq=max(15000 // N_ENVS, 1),
+        deterministic=True, render=False
     )
     checkpoint_callback = CheckpointCallback(
-        save_freq=max(50000 // N_ENVS, 1), save_path='sb3_models/', name_prefix='ppo_bc'
+        save_freq=max(50000 // N_ENVS, 1), save_path='sb3_models/', name_prefix='ppo_mixed_bc'
     )
     
+    # *** CRITICAL FIX: Lower learning rate and entropy for fine-tuning ***
+    model.learning_rate = 5e-6  # Much smaller learning rate
+    model.ent_coef = 0.001     # Lower entropy to encourage exploitation
+
+    # The .learn() call will now start from the BC-trained policy
     model.learn(
         total_timesteps=TOTAL_TIMESTEPS,
         callback=[checkpoint_callback, eval_callback],
         progress_bar=True,
-        reset_num_timesteps=False # Continue timestep count from 0, but policy is pre-trained
+        reset_num_timesteps=False # IMPORTANT: Do not reset timesteps after BC
     )
     
-    # --- 8. Save Final Model ---
-    model.save("sb3_models/ppo_bc_final")
-    env.save("sb3_models/vec_normalize_final.pkl")
-    print(f"\n🎉 TRAINING COMPLETE! Model saved.")
+    # --- 9. Save Final Model and Normalization Stats ---
+    model.save("sb3_models/ppo_mixed_bc_final")
+    env.save("sb3_models/vec_normalize_mixed_final.pkl") # This saves the normalization stats
+    print(f"\n🎉 GENERALIZED TRAINING COMPLETE! Model and normalization stats saved.")
     
     env.close()
     eval_env.close()
