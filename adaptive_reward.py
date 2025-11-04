@@ -46,25 +46,26 @@ class AdaptiveRewardComputer:
         """Get configuration parameters for current training stage."""
         configs = {
             "early": {
-                "base_penalty": -5.0,
+                "base_penalty": -1.0,  # <-- 1. DRASTICALLY reduce the base penalty
                 "min_compliant_steps": 20,
                 "energy_reward_scale": 1.0,
-                "constraint_tolerance": 0.05,  # 5% tolerance on thresholds
-                "enable_energy_early": True
+                "constraint_tolerance": 0.20,  # <-- 2. INCREASE tolerance significantly (20%)
+                "enable_energy_early": True,
+                "penalty_mode": "additive" # <-- 3. ADD a switch to change penalty math
             },
             "medium": {
-                "base_penalty": -8.0,
+                "base_penalty": -5.0,
                 "min_compliant_steps": 35,
                 "energy_reward_scale": 1.5,
-                "constraint_tolerance": 0.02,
-                "enable_energy_early": True
+                "constraint_tolerance": 0.05, # Looser than before
+                "penalty_mode": "multiplicative_soft"
             },
             "stable": {
                 "base_penalty": -10.0,
                 "min_compliant_steps": 50,
                 "energy_reward_scale": 2.0,
                 "constraint_tolerance": 0.00,
-                "enable_energy_early": False
+                "penalty_mode": "multiplicative_hard"
             }
         }
         return configs.get(stage, configs["stable"])
@@ -177,23 +178,29 @@ class AdaptiveRewardComputer:
     
     def _compute_adaptive_penalty(self, violations: Dict[str, Any], metrics: Dict[str, Any]) -> float:
         """Compute penalty with adaptive scaling based on violation patterns."""
-        # Base penalty from config
         penalty = self.stage_config["base_penalty"]
-        
-        # Priority-based penalty scaling
-        critical_multiplier = 1.0 + violations['critical_violations'] * 2.0
-        high_multiplier = 1.0 + violations['high_violations'] * 1.5
-        medium_multiplier = 1.0 + violations['medium_violations'] * 1.0
-        
-        penalty *= critical_multiplier * high_multiplier * medium_multiplier
+        penalty_mode = self.stage_config.get("penalty_mode", "multiplicative_hard")
+
+        # --- NEW ADDITIVE PENALTY LOGIC FOR EARLY STAGE ---
+        if penalty_mode == "additive":
+            # Sum up penalties instead of multiplying them
+            penalty += violations['critical_violations'] * -2.0
+            penalty += violations['high_violations'] * -1.0
+            penalty += violations['medium_violations'] * -0.5
+        else:
+            # Original multiplicative logic (can be softened for medium stage)
+            critical_multiplier = 1.0 + violations['critical_violations'] * (1.0 if penalty_mode == "multiplicative_soft" else 2.0)
+            high_multiplier = 1.0 + violations['high_violations'] * (0.5 if penalty_mode == "multiplicative_soft" else 1.5)
+            medium_multiplier = 1.0 + violations['medium_violations'] * (0.25 if penalty_mode == "multiplicative_soft" else 1.0)
+            penalty *= critical_multiplier * high_multiplier * medium_multiplier
         
         # Pattern-based penalty: additional penalty for repeated violation types
         pattern_penalty = self._compute_pattern_penalty(violations)
         penalty += pattern_penalty
         
         # Consecutive violation penalty (softer than original)
-        if self.consecutive_violations > 3:
-            consecutive_factor = 1.0 + (min(self.consecutive_violations - 3, 20) * 0.1)
+        if self.consecutive_violations > 5: # Give it a few steps grace period
+            consecutive_factor = 1.0 + (min(self.consecutive_violations - 5, 20) * 0.05) # Softer scaling
             penalty *= consecutive_factor
         
         # Update tracking
@@ -201,7 +208,7 @@ class AdaptiveRewardComputer:
         self.consecutive_violations += 1
         
         # Ensure reasonable penalty bounds
-        return max(penalty, -200.0)
+        return max(penalty, -100.0) # Cap the max penalty to prevent collapse
     
     def _compute_pattern_penalty(self, violations: Dict[str, Any]) -> float:
         """Additional penalty for repeated violation patterns."""
