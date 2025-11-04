@@ -90,17 +90,17 @@ def create_enhanced_model(algorithm: str, env: VecNormalize, device: torch.devic
         "early": {
             "learning_rate": 5e-4,  # Higher learning rate for faster initial learning
             "gamma": 0.98,  # Shorter horizon for early training
-            "ent_coef": 0.01,  # Higher exploration
+            "ent_coef": 0.05,  # Higher exploration
         },
         "medium": {
             "learning_rate": 3e-4,
             "gamma": 0.99,
-            "ent_coef": 0.005,
+            "ent_coef": 0.01,
         },
         "stable": {
             "learning_rate": 1e-4,  # Lower learning rate for fine-tuning
             "gamma": 0.995,  # Longer horizon
-            "ent_coef": 0.001,  # Lower exploration
+            "ent_coef": 0.005,  # Lower exploration
         }
     }
     
