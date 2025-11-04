@@ -5,8 +5,8 @@ import pickle
 import os
 import random
 import json
-import tqdm
 import multiprocessing
+from tqdm import tqdm
 from stable_baselines3 import PPO
 from stable_baselines3.common.vec_env import VecNormalize, SubprocVecEnv, DummyVecEnv
 from stable_baselines3.common.callbacks import CheckpointCallback, EvalCallback
@@ -166,7 +166,7 @@ def generate_expert_dataset_parallel(configs: list, behavioral_policy, num_episo
             tasks.append((config.copy(), behavioral_policy))
 
     # Use as many processes as there are CPU cores
-    num_processes = multiprocessing.cpu_count()
+    num_processes = multiprocessing.cpu_count() - 6
     print(f"Using {num_processes} parallel processes for data generation...")
 
     expert_observations = []
