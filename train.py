@@ -22,7 +22,7 @@ from collections import defaultdict, deque
 from stable_baselines3 import PPO, SAC, TD3, DDPG
 from stable_baselines3.common.callbacks import CheckpointCallback, EvalCallback
 from stable_baselines3.common.monitor import Monitor
-from stable_baselines3.common.vec_env import SubprocVecEnv, VecNormalize
+from stable_baselines3.common.vec_env import SubprocVecEnv, DummyVecEnv, VecNormalize
 from stable_baselines3.common.base_class import BaseAlgorithm
 
 # Custom components
@@ -116,8 +116,8 @@ class TrainingPipeline:
         # Create vectorized environment
         env_factories = [self.create_environment(scenarios[i % len(scenarios)], seed=i) 
                         for i in range(n_envs)]
-        vec_env = SubprocVecEnv(env_factories)
-        vec_env = VecNormalize(vec_env, norm_obs=True, norm_reward=True, clip_obs=10.0)
+        subproc_vec_env = SubprocVecEnv(env_factories)
+        vec_env = VecNormalize(subproc_vec_env, norm_obs=True, norm_reward=True, clip_obs=10.0)
         
         # Create model
         model_class = {'ppo': PPO, 'sac': SAC, 'td3': TD3, 'ddpg': DDPG}[algorithm]
@@ -158,10 +158,11 @@ class TrainingPipeline:
     
     def _setup_callbacks(self) -> List:
         """Setup training callbacks."""
+        eval_env = DummyVecEnv([self.create_environment({}, seed=999)])
         callbacks = [
             CheckpointCallback(save_freq=50000, save_path='checkpoints/'),
             EvalCallback(
-                eval_env=SubprocVecEnv([self.create_environment({}, seed=999)]),
+                eval_env=VecNormalize(eval_env, norm_obs=True, norm_reward=True, clip_obs=10.0),
                 best_model_save_path='best_models/',
                 log_path='eval_logs/',
                 eval_freq=10000

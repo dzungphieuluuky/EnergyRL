@@ -100,8 +100,8 @@ class StrictConstraintWrapper(gym.Wrapper):
         p = self.env.sim_params
         
         violations = {
-            'drop_rate': metrics['avg_drop_rate'] > p.drop_call_threshold,
-            'latency': metrics['avg_latency'] > p.latency_threshold,
+            'drop_rate': metrics['avg_drop_rate'] > p.dropCallThreshold,
+            'latency': metrics['avg_latency'] > p.latencyThreshold,
             'cpu': metrics['cpu_violations'] > 0,
             'prb': metrics['prb_violations'] > 0,
             'connectivity': metrics.get('connection_rate', 1.0) < 0.95
