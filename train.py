@@ -33,6 +33,7 @@ from custom_models_sb3 import EnhancedAttentionNetwork
 from callback import *
 from wrapper import *
 
+LAGRANGE_LR = 0.005
 
 @dataclass
 class TrainingConfig:
@@ -78,16 +79,17 @@ class TrainingPipeline:
         
         algorithm_params = {
             'ppo': {
-                'learning_rate': 3e-4,
+                'learning_rate': 3e-5,
                 'n_steps': 4096,
                 'batch_size': 256,
-                'n_epochs': 10,
+                'n_epochs': 20,
                 'gamma': 0.995,
                 'gae_lambda': 0.95,
                 'clip_range': 0.2,
-                'ent_coef': 0.05,
+                'ent_coef': 0.01,
                 'vf_coef': 0.5,
-                'max_grad_norm': 0.5
+                'max_grad_norm': 0.5,
+                'target_kl': 0.02
             },
             'sac': {
                 'learning_rate': 3e-4,
@@ -212,6 +214,7 @@ class TrainingPipeline:
         eval_env = DummyVecEnv([self.create_environment({}, seed=999)])
         callbacks = [
             CheckpointCallback(save_freq=50000, save_path='checkpoints/'),
+            FileLoggingCallback(log_path="training_log.log"),
             LoggedEvalCallback(
                 eval_env=VecNormalize(eval_env, norm_obs=True, norm_reward=True, clip_obs=10.0),
                 best_model_save_path='best_models/',
@@ -219,8 +222,17 @@ class TrainingPipeline:
                 eval_freq=10000,
             ),
             ConstraintMonitorCallback(verbose=1),
-            LambdaUpdateCallback(lambda_lr=0.01, update_freq=self.model.n_steps),
+            AdamLambdaUpdateCallback(
+                constraint_keys=self.config.constraint_keys,
+                lambda_lr=0.05,
+                update_freq=self.model.n_steps,
+            )
         ]
+
+        for callback in callbacks:
+            if hasattr(callback, 'logger'):
+                callback.logger = self.logger
+
         return callbacks
     
     def _save_model(self, model: BaseAlgorithm, algorithm: str):

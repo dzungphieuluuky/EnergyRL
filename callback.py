@@ -1,5 +1,10 @@
 from stable_baselines3.common.callbacks import BaseCallback, EvalCallback
 import numpy as np
+from collections import defaultdict
+from typing import Dict, Any
+import logging
+import torch
+
 class ConstraintMonitorCallback(BaseCallback):
     """Enhanced monitoring with violation tracking and adaptive penalties."""
     
@@ -68,48 +73,160 @@ class AlgorithmComparisonCallback(BaseCallback):
         return True
     
 class LambdaUpdateCallback(BaseCallback):
-    """
-    Performs gradient descent to update the Lagrange multipliers (lambdas).
+    """Callback to update Lagrange multipliers."""
     
-    The update rule for each lambda is: λ_new = max(0, λ_old + learning_rate * cost).
-    This is a gradient ascent step on the cost, which minimizes the Lagrangian objective.
-    """
-    def __init__(self, lambda_lr: float = 0.01, update_freq: int = 1000, verbose: int = 1):
+    def __init__(self, lambda_lr: float = 0.01, update_freq: int = 2048, verbose: int = 0):
         super().__init__(verbose)
         self.lambda_lr = lambda_lr
         self.update_freq = update_freq
+        self.lambda_history = defaultdict(list)
+    
+    def _on_step(self) -> bool:
+        return True
+    
+    def _on_rollout_end(self) -> None:
+        """Update lambda values at the end of each rollout."""
+        # Get constraint violations from all environments
+        if hasattr(self.training_env, 'get_attr'):
+            # VecEnv case
+            try:
+                # Get lambdas and violations from the first environment
+                env_lambdas = self.training_env.get_attr('lambdas')[0]
+                env_violations = self.training_env.get_attr('constraint_violations')[0]
+                
+                # Update lambdas based on violations
+                for key in env_lambdas.keys():
+                    violation = env_violations.get(key, 0.0)
+                    old_lambda = env_lambdas[key]
+                    new_lambda = max(0.0, old_lambda + self.lambda_lr * violation)
+                    
+                    # Set updated lambda to all environments
+                    for env_idx in range(self.training_env.num_envs):
+                        self.training_env.env_method('set_lambda', key, new_lambda, indices=[env_idx])
+                    
+                    # Store history
+                    self.lambda_history[key].append(new_lambda)
+                
+                # Log the updates
+                if self.verbose > 0 and hasattr(self, 'logger') and self.logger is not None:
+                    latest_values = {f"lambda/{key}": val[-1] for key, val in self.lambda_history.items()}
+                    log_string = self._format_log_string(latest_values)
+                    self.logger.info(f"Lambda Update: {log_string}")
+                    
+            except (AttributeError, IndexError) as e:
+                if self.verbose > 0:
+                    print(f"Warning: Could not update lambdas: {e}")
+    
+    def _format_log_string(self, values: dict[str, float]) -> str:
+        """Format lambda values as a readable string."""
+        if not isinstance(values, dict):
+            return str(values)
+        
+        parts = []
+        for key, value in values.items():
+            if isinstance(value, (int, float)):
+                parts.append(f"{key}={value:.4f}")
+            else:
+                parts.append(f"{key}={value}")
+        return ", ".join(parts)
+
+class AdamLambdaUpdateCallback(BaseCallback):
+    """
+    Updates Lagrange multipliers (lambdas) using the Adam optimizer.
+    This provides momentum and adaptive learning rates for more stable updates.
+
+    :param constraint_keys: A list of keys for the constraints (e.g., ['drop_rate', 'latency']).
+    :param initial_lambdas: A dictionary of initial lambda values.
+    :param lambda_lr: The learning rate for the Adam optimizer.
+    :param update_freq: How often to update the lambdas (in steps).
+    """
+    def __init__(self, 
+                 constraint_keys: list[str],
+                 initial_lambda_value: float = 1.0,
+                 lambda_lr: float = 0.01, 
+                 update_freq: int = 1000, 
+                 verbose: int = 1):
+        super().__init__(verbose)
+        self.lambda_lr = lambda_lr
+        self.update_freq = update_freq
+        if constraint_keys is None:
+            self.constraint_keys = ['drop_rate', 'latency', 'cpu_usage', 'prb_usage']
+        else:
+            self.constraint_keys = constraint_keys
+            
+        # --- 1. Set up the Lambdas as PyTorch Parameters ---
+        # We treat the lambdas as learnable parameters so we can use a PyTorch optimizer.
+        # We store the log of the lambdas for numerical stability and to ensure they remain non-negative.
+        initial_log_lambdas = {key: torch.tensor(np.log(initial_lambda_value), dtype=torch.float32) 
+                               for key in self.constraint_keys}
+        self.log_lambdas = torch.nn.ParameterDict(initial_log_lambdas)
+
+        # --- 2. Initialize the Adam Optimizer ---
+        # The optimizer will manage the updates for our log_lambdas parameters.
+        self.optimizer = torch.optim.Adam(self.log_lambdas.parameters(), lr=self.lambda_lr)
 
     def _on_step(self) -> bool:
-        # Update lambdas only at a specified frequency to ensure stability
         if self.n_calls % self.update_freq == 0:
-            # --- 1. Collect Costs from all parallel environments ---
-            all_costs = {key: [] for key in self.training_env.get_attr('constraint_keys')[0]}
+            # --- 3. Collect and Average Costs ---
+            all_costs = {key: [] for key in self.constraint_keys}
             for info in self.locals.get("infos", []):
                 if 'lagrangian_costs' in info:
                     for key, cost in info['lagrangian_costs'].items():
                         all_costs[key].append(cost)
             
-            # --- 2. Average Costs Across the collected batch ---
-            mean_costs = {key: np.mean(values) for key, values in all_costs.items()}
+            mean_costs = {key: np.mean(values) if values else 0.0 
+                          for key, values in all_costs.items()}
             
-            # --- 3. Apply the Gradient Update Rule ---
-            current_lambdas = self.training_env.get_attr('lambdas')[0]
-            new_lambdas = {}
-            for key, cost in mean_costs.items():
-                # The core of the dual update: λ_t+1 = λ_t + α * C(s_t)
-                new_lambda = current_lambdas[key] + self.lambda_lr * cost
-                # Lambdas must always be non-negative
-                new_lambdas[key] = max(0, new_lambda)
+            # --- 4. Perform the Gradient Update with Adam ---
+            self.optimizer.zero_grad(set_to_none=True)
             
-            # --- 4. Update Lambdas in All Parallel Environments ---
-            self.training_env.env_method('update_lambdas', new_lambdas)
+            # The "loss" for our dual problem is `- (lambda * cost)`.
+            # To perform gradient ascent (maximize this), we minimize the negative of it.
+            # This is equivalent to `d_lambda = cost`.
+            loss = 0
+            for key in self.constraint_keys:
+                # We work with log_lambdas, so we exponentiate to get the actual lambda value.
+                # This ensures lambda is always >= 0.
+                lambda_val = torch.exp(self.log_lambdas[key])
+                loss -= lambda_val * mean_costs[key]
             
-            # --- 5. Log everything to TensorBoard for monitoring ---
-            for key, value in new_lambdas.items():
+            # Backpropagate to compute gradients (d_loss / d_lambda)
+            loss.backward()
+            
+            # Adam takes a step to update the log_lambdas
+            self.optimizer.step()
+            
+            # --- 5. Update Lambdas in the Environment and Log ---
+            with torch.no_grad():
+                current_lambdas = {key: torch.exp(self.log_lambdas[key]).item() 
+                                   for key in self.constraint_keys}
+            
+            self.training_env.env_method('update_lambdas', current_lambdas)
+            
+            if self.verbose > 0 and self.n_calls % (self.update_freq * 10) == 0:
+                print(f"\n[AdamLambdaUpdate] Step {self.num_timesteps}:")
+                for key in self.constraint_keys:
+                    print(f"  - {key:<20s} | λ: {current_lambdas[key]:<8.4f} | Cost: {mean_costs[key]:.4f}")
+
+            # Log to TensorBoard
+            for key, value in current_lambdas.items():
                 self.logger.record(f'lagrangian/lambda_{key}', value)
             for key, value in mean_costs.items():
                 self.logger.record(f'lagrangian/cost_{key}', value)
         return True
+    
+    def _format_log_string(self, values: dict[str, float]) -> str:
+        """Format lambda values as a readable string."""
+        if not isinstance(values, dict):
+            return str(values)
+        
+        parts = []
+        for key, value in values.items():
+            if isinstance(value, (int, float)):
+                parts.append(f"{key}={value:.4f}")
+            else:
+                parts.append(f"{key}={value}")
+        return ", ".join(parts)
 
 class CurriculumLearningCallback(BaseCallback):
     """
@@ -189,3 +306,89 @@ class LoggedEvalCallback(EvalCallback):
             self.logger.info(f"[Evaluation at step {self.num_timesteps}] Mean Reward: {mean_reward:.2f} +/- {std_reward:.2f}")
 
         return result
+
+class FileLoggingCallback(BaseCallback):
+    """
+    A custom callback that intercepts Stable Baselines3's logging data
+    and writes it to a structured log file.
+
+    :param log_path: Path to the log file.
+    """
+    def __init__(self, log_path: str, verbose: int = 0):
+        super().__init__(verbose)
+        self.log_path = log_path
+        
+        # --- 1. Set up the Python logger ---
+        self.file_logger = logging.getLogger(__name__)
+        self.file_logger.setLevel(logging.INFO)
+        
+        # Prevent the logger from propagating messages to the root logger
+        self.file_logger.propagate = False
+        
+        # Create a file handler
+        file_handler = logging.FileHandler(self.log_path, mode='a') # 'w' to overwrite on each run
+        file_handler.setLevel(logging.INFO)
+        # Create a formatter and set it for the handler
+        # We only want the raw message, no extra timestamps or levels
+        formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+        file_handler.setFormatter(formatter)
+        
+        # Add the handler to the logger
+        self.file_logger.addHandler(file_handler)
+        
+        print(f"\n[FileLoggingCallback] Logging training data to: {self.log_path}")
+
+    def _on_step(self):
+        return super()._on_step()
+    
+    def _on_rollout_end(self) -> bool:
+        """
+        This method is called at the end of each rollout.
+        It's the perfect place to access the aggregated logs.
+        """
+        # --- 2. Get the latest logged values from the SB3 logger ---
+        # This is a dictionary containing all the data like 'rollout/ep_rew_mean', etc.
+        latest_values = self.locals
+
+        if not latest_values:
+            return True
+
+        # --- 3. Format the data into a nice, readable string ---
+        log_string = self._format_log_string(latest_values)
+        
+        # --- 4. Write the formatted string to the file ---
+        self.file_logger.info(log_string)
+        
+        return True
+    
+    def _format_log_string(self, values: dict) -> str:
+        """Formats the dictionary of values into a table-like string."""
+        
+        # Group keys by their prefix (e.g., 'lagrangian', 'rollout', 'time')
+        log_groups = {}
+        for key, value in values.items():
+            if '/' in key:
+                group, metric = key.split('/', 1)
+                if group not in log_groups:
+                    log_groups[group] = {}
+                log_groups[group][metric] = value
+        
+        # Build the multi-line string
+        output = f"-------------------[ Timestep {self.num_timesteps} ]-------------------\n"
+        
+        # Define the order of groups for consistent logging
+        group_order = ['lagrangian', 'rollout', 'time', 'train']
+        
+        for group in group_order:
+            if group in log_groups:
+                output += f"| {group}/\n"
+                # Sort metrics within the group for consistent order
+                for metric, value in sorted(log_groups[group].items()):
+                    # Format numbers to be clean and aligned
+                    if isinstance(value, (float, np.floating)):
+                        output += f"|    {metric:<20s} | {value:<10.3g}\n"
+                    else:
+                        output += f"|    {metric:<20s} | {value:<10}\n"
+
+        output += "--------------------------------------------------------\n\n"
+        return output
