@@ -45,7 +45,7 @@ class TrainingConfig:
     
     def __post_init__(self):
         if self.constraint_keys is None:
-            self.constraint_keys = ['drop_rate', 'latency', 'cpu_violations', 'prb_violations']
+            self.constraint_keys=['avg_drop_rate', 'avg_latency', 'cpu_violations', 'prb_violations']
         if self.device is None:
             self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
@@ -127,7 +127,13 @@ class TrainingPipeline:
             return monitored_env
         def make_cost_lagrange_env():
             base_env = FiveGEnv(env_config, self.config.max_cells)
-            cost_lagrangian_env = LagrangianCostWrapper(base_env)
+            cost_lagrangian_env = LagrangianCostWrapper(base_env,
+                                                        constraint_thresholds={
+                                                            'avg_drop_rate': 1.0,
+                                                            'avg_latency': 50.0,
+                                                            'cpu_violations': 0.0,
+                                                            'prb_violations': 0.0
+                                                        })
             monitored_env = Monitor(cost_lagrangian_env)
             return monitored_env
         
