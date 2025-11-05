@@ -29,7 +29,10 @@ from stable_baselines3.common.base_class import BaseAlgorithm
 from fiveg_env import FiveGEnv
 from custom_models_sb3 import EnhancedAttentionNetwork
 from callback import ConstraintMonitorCallback, AlgorithmComparisonCallback
-from wrapper import LagrangianRewardWrapper, StrictConstraintWrapper, SimplifiedHERForPPO
+from wrapper import (LagrangianRewardWrapper, 
+                     StrictConstraintWrapper, 
+                     SimplifiedHERForPPO,
+                     GatedRewardWrapper)
 
 
 @dataclass
@@ -97,9 +100,9 @@ class TrainingPipeline:
         
         return {algo: {**base_params, **params} for algo, params in algorithm_params.items()}
     
-    def create_environment(self, env_config: Dict[str, Any], seed: int, name_env: str = "default") -> Callable:
+    def create_environment(self, env_config: Dict[str, Any], seed: int, name_env: str = "gated") -> Callable:
         """Create environment factory function."""
-        def _make_env() -> gym.Env:
+        def _make_strict_constraint_env() -> gym.Env:
             base_env = FiveGEnv(env_config, self.config.max_cells)
             wrapped_env = StrictConstraintWrapper(base_env)
             monitored_env = Monitor(wrapped_env)
@@ -109,12 +112,19 @@ class TrainingPipeline:
             simple_her_env = SimplifiedHERForPPO(base_env)
             monitored_env = Monitor(simple_her_env)
             return monitored_env
+        def _make_gated_env():
+            base_env = FiveGEnv(env_config, self.config.max_cells)
+            lagrangian_env = GatedRewardWrapper(base_env)
+            monitored_env = Monitor(lagrangian_env)
+            return monitored_env
         
         # Return appropriate environment factory
         if name_env == "her":
             return _make_her_env
-        else:
-            return _make_env
+        elif name_env == "gated":
+            return _make_gated_env
+        elif name_env == "strict":
+            return _make_strict_constraint_env
     
     def train(self, algorithm: str, total_timesteps: int, n_envs: int = 4, name_env: str = "default") -> BaseAlgorithm:
         """Execute the complete training pipeline."""

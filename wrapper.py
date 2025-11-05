@@ -638,3 +638,43 @@ class SimplifiedHERForPPO(gym.Wrapper):
             
             print(f"  Milestones Reached: {sum(self.milestones_reached.values())}/{len(self.milestones_reached)}")
             print(f"{'='*70}\n")
+
+class GatedRewardWrapper(gym.Wrapper):
+    def __init__(self, env: FiveGEnv):
+        super().__init__(env)
+        self.sim_params = env.sim_params
+        self.n_cells = env.n_cells
+
+    def step(self, action):
+        obs, _, terminated, truncated, info = self.env.step(action)
+        
+        # The reward logic is now based on the metrics from the step
+        metrics = info 
+        
+        is_compliant = self._check_constraints(metrics)
+        
+        if not is_compliant:
+            # A consistent, negative signal to tell the agent this state is bad.
+            # This provides a gradient to escape the violation state.
+            reward = -1.0 
+        else:
+            # Only if compliant, reward the agent for energy efficiency.
+            # The reward is the fraction of energy SAVED. Range [0, 1].
+            total_energy = metrics.get('total_energy', 0)
+            max_power = 10**((self.sim_params.maxTxPower - 30) / 10)
+            max_energy = self.n_cells * (self.sim_params.idlePower + max_power)
+            efficiency = 1.0 - (total_energy / max(1, max_energy))
+            reward = max(0.0, efficiency)
+
+        return obs, reward, terminated, truncated, info
+
+    def _check_constraints(self, metrics: Dict[str, Any]) -> bool:
+        """Checks if all critical constraints are satisfied."""
+        if metrics.get('avg_drop_rate', 100) > self.sim_params.dropCallThreshold: return False
+        if metrics.get('avg_latency', 1000) > self.sim_params.latencyThreshold: return False
+        if metrics.get('cpu_violations', 1) > 0: return False
+        if metrics.get('prb_violations', 1) > 0: return False
+        # The contest description doesn't specify a connectivity constraint, 
+        # but it's good practice to keep one to prevent the agent from turning off all cells.
+        if metrics.get('connection_rate', 0) < 0.90: return False
+        return True
