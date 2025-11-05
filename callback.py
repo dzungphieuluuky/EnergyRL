@@ -66,3 +66,102 @@ class AlgorithmComparisonCallback(BaseCallback):
                 print(f"Episode {len(self.episode_rewards)}, Last 10 eps mean reward: {mean_reward:.3f}")
         
         return True
+
+class LambdaUpdateCallback(BaseCallback):
+    """
+    Performs gradient descent to update the Lagrange multipliers (lambdas).
+    
+    The update rule for each lambda is:
+      λ_new = max(0, λ_old + learning_rate * cost)
+    This is a gradient ascent step on the cost, which minimizes the Lagrangian objective.
+    """
+    def __init__(self, lambda_lr: float = 0.01, update_freq: int = 1000, verbose: int = 1):
+        super().__init__(verbose)
+        self.lambda_lr = lambda_lr
+        self.update_freq = update_freq
+
+    def _on_step(self) -> bool:
+        if self.n_calls % self.update_freq == 0:
+            # --- 1. Collect Costs ---
+            all_costs = {key: [] for key in self.training_env.get_attr('constraint_keys')[0]}
+            for info in self.locals.get("infos", []):
+                if 'lagrangian_costs' in info:
+                    for key, cost in info['lagrangian_costs'].items():
+                        all_costs[key].append(cost)
+            
+            # --- 2. Average Costs Across Batch ---
+            mean_costs = {key: np.mean(values) for key, values in all_costs.items()}
+            
+            # --- 3. Apply Gradient Update ---
+            current_lambdas = self.training_env.get_attr('lambdas')[0]
+            new_lambdas = {}
+            for key, cost in mean_costs.items():
+                # The gradient descent step for the dual variable
+                new_lambda = current_lambdas[key] + self.lambda_lr * cost
+                # Lambdas must be non-negative
+                new_lambdas[key] = max(0, new_lambda)
+            
+            # --- 4. Update Lambdas in All Environments ---
+            self.training_env.env_method('update_lambdas', new_lambdas)
+            
+            # --- 5. Log to TensorBoard ---
+            for key, value in new_lambdas.items():
+                self.logger.record(f'lagrangian/lambda_{key}', value)
+            for key, value in mean_costs.items():
+                self.logger.record(f'lagrangian/cost_{key}', value)
+        return True
+
+class CurriculumLearningCallback(BaseCallback):
+    """
+    Callback for automatic curriculum learning - advances training stages
+    based on performance metrics.
+    """
+    
+    def __init__(self, eval_freq: int = 10000, compliance_threshold: float = 0.85, 
+                 min_steps_in_stage: int = 50000, verbose: int = 1):
+        super(CurriculumLearningCallback, self).__init__(verbose)
+        self.eval_freq = eval_freq
+        self.compliance_threshold = compliance_threshold
+        self.min_steps_in_stage = min_steps_in_stage
+        self.last_eval_step = 0
+        self.current_stage = "early"
+        
+    def _on_step(self) -> bool:
+        # Check if it's time to evaluate for stage advancement
+        if self.n_calls - self.last_eval_step >= self.eval_freq:
+            self.last_eval_step = self.n_calls
+            
+            # Get compliance rate from environments
+            compliance_rates = []
+            for env in self.training_env.envs:
+                if hasattr(env, 'env') and hasattr(env.env, 'reward_computer'):
+                    stats = env.env.reward_computer.get_stats()
+                    compliance_rates.append(stats.get('compliance_rate', 0))
+            
+            if compliance_rates:
+                avg_compliance = np.mean(compliance_rates) / 100.0  # Convert from percentage
+                
+                # Check if we should advance to next stage
+                if (self.n_calls >= self.min_steps_in_stage and 
+                    avg_compliance >= self.compliance_threshold):
+                    
+                    self._advance_training_stage()
+        
+        return True
+    
+    def _advance_training_stage(self):
+        """Advance all environments to next training stage."""
+        stages = ["early", "medium", "stable"]
+        current_index = stages.index(self.current_stage)
+        
+        if current_index < len(stages) - 1:
+            new_stage = stages[current_index + 1]
+            self.current_stage = new_stage
+            
+            # Advance stage in all environments
+            for env in self.training_env.envs:
+                if hasattr(env, 'env') and hasattr(env.env, 'reward_computer'):
+                    env.env.reward_computer.advance_training_stage()
+            
+            if self.verbose >= 1:
+                print(f"\n🎓 CURRICULUM: Advanced to {new_stage} training stage at step {self.n_calls}")

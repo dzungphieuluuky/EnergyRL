@@ -14,61 +14,8 @@ from stable_baselines3.common.base_class import BaseAlgorithm
 
 from fiveg_env import FiveGEnv
 from custom_models_sb3 import EnhancedAttentionNetwork
-
-class CurriculumLearningCallback(BaseCallback):
-    """
-    Callback for automatic curriculum learning - advances training stages
-    based on performance metrics.
-    """
-    
-    def __init__(self, eval_freq: int = 10000, compliance_threshold: float = 0.85, 
-                 min_steps_in_stage: int = 50000, verbose: int = 1):
-        super(CurriculumLearningCallback, self).__init__(verbose)
-        self.eval_freq = eval_freq
-        self.compliance_threshold = compliance_threshold
-        self.min_steps_in_stage = min_steps_in_stage
-        self.last_eval_step = 0
-        self.current_stage = "early"
-        
-    def _on_step(self) -> bool:
-        # Check if it's time to evaluate for stage advancement
-        if self.n_calls - self.last_eval_step >= self.eval_freq:
-            self.last_eval_step = self.n_calls
-            
-            # Get compliance rate from environments
-            compliance_rates = []
-            for env in self.training_env.envs:
-                if hasattr(env, 'env') and hasattr(env.env, 'reward_computer'):
-                    stats = env.env.reward_computer.get_stats()
-                    compliance_rates.append(stats.get('compliance_rate', 0))
-            
-            if compliance_rates:
-                avg_compliance = np.mean(compliance_rates) / 100.0  # Convert from percentage
-                
-                # Check if we should advance to next stage
-                if (self.n_calls >= self.min_steps_in_stage and 
-                    avg_compliance >= self.compliance_threshold):
-                    
-                    self._advance_training_stage()
-        
-        return True
-    
-    def _advance_training_stage(self):
-        """Advance all environments to next training stage."""
-        stages = ["early", "medium", "stable"]
-        current_index = stages.index(self.current_stage)
-        
-        if current_index < len(stages) - 1:
-            new_stage = stages[current_index + 1]
-            self.current_stage = new_stage
-            
-            # Advance stage in all environments
-            for env in self.training_env.envs:
-                if hasattr(env, 'env') and hasattr(env.env, 'reward_computer'):
-                    env.env.reward_computer.advance_training_stage()
-            
-            if self.verbose >= 1:
-                print(f"\n🎓 CURRICULUM: Advanced to {new_stage} training stage at step {self.n_calls}")
+from adaptive_reward import create_safe_5g_training
+from callback import CurriculumLearningCallback
 
 def make_env_thunk(env_config: Dict[str, Any], max_cells: int, seed: int, training_stage: str = "stable") -> Callable:
     """Creates a thunk with training stage support."""

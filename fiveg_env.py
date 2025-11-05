@@ -7,8 +7,6 @@ import gymnasium as gym
 from gymnasium import spaces
 from typing import List, Tuple, Dict, Any, Optional
 
-from improved_reward import ImprovedRewardComputer
-from adaptive_reward import AdaptiveRewardComputer
 from fiveg_objects import Cell, UE, SimulationParams
 from simulation_logic import (
     update_ue_mobility, update_signal_measurements, check_handover_events,
@@ -24,8 +22,9 @@ def run_simulation_step(
     """Runs one step of the simulation logic."""
     if action is not None:
         for i, cell in enumerate(cells):
-            power_range = cell.max_tx_power - cell.min_tx_power
-            cell.tx_power = cell.min_tx_power + action[i] * power_range
+            if i < len(action):
+                power_range = cell.max_tx_power - cell.min_tx_power
+                cell.tx_power = cell.min_tx_power + action[i] * power_range
 
     ues = update_ue_mobility(ues, time_step, current_time, seed)
     ues = update_signal_measurements(ues, cells, sim_params.rsrpMeasurementThreshold, current_time, seed)
@@ -36,36 +35,33 @@ def run_simulation_step(
     cells = update_cell_resource_usage(cells, ues)
     return ues, cells
 
-
 class FiveGEnv(gym.Env):
-    def __init__(self, env_config: Dict[str, Any], max_cells: int = 57) -> None:
+    """
+    A Gymnasium environment for 5G network simulation.
+    This base environment is responsible for the simulation physics only.
+    Reward shaping is handled by wrappers.
+    """
+    def __init__(self, env_config: Dict[str, Any], max_cells: int = 57):
         super().__init__()
         self.sim_params = load_scenario_config(env_config.get('deploymentScenario', 'dense_urban'))
         for key, value in env_config.items():
             if hasattr(self.sim_params, key):
                 setattr(self.sim_params, key, value)
 
-        self.time_step_duration: float = self.sim_params.timeStep
-        self.max_time_steps: int = self.sim_params.total_steps
-        self.max_cells: int = int(max_cells)
-        self.state_dim_per_cell: int = 25
+        self.max_cells = int(max_cells)
+        self.state_dim_per_cell = 25
         self.seed = int(env_config.get('seed', 42))
 
         self.action_space = spaces.Box(low=0.0, high=1.0, shape=(self.max_cells,), dtype=np.float32)
-        state_dim: int = 17 + 14 + (self.max_cells * self.state_dim_per_cell)
+        state_dim = 17 + 14 + (self.max_cells * self.state_dim_per_cell)
         self.observation_space = spaces.Box(low=-np.inf, high=np.inf, shape=(state_dim,), dtype=np.float32)
-
+        
         self.cells: List[Cell] = []
         self.ues: List[UE] = []
-        self.n_cells: int = 0
-        self.n_ues: int = 0
-        self.current_step: int = 0
-        self.total_episodes: int = 0
-        self.current_episode_reward: float = 0.0
-        self.qos_compliant_steps: int = 0
+        self.n_cells = 0
+        self.n_ues = 0
+        self.current_step = 0
 
-        training_stage = env_config.get('training_stage', 'early')
-        self.reward_computer = AdaptiveRewardComputer(self.sim_params, self.max_cells, training_stage)
     def _setup_scenario(self, seed: int):
         sites = create_sites(self.sim_params, seed)
         self.cells = configure_cells(sites, self.sim_params)
@@ -79,7 +75,7 @@ class FiveGEnv(gym.Env):
         p = self.sim_params
         sim_features = [
             float(self.n_cells), float(self.n_ues), float(p.simTime), float(p.timeStep),
-            float(self.current_step / max(1.0, self.max_time_steps)), float(p.carrierFrequency),
+            float(self.current_step / max(1.0, p.total_steps)), float(p.carrierFrequency),
             float(p.isd), float(p.minTxPower), float(p.maxTxPower), float(p.basePower), float(p.idlePower),
             float(p.dropCallThreshold), float(p.latencyThreshold), float(p.cpuThreshold),
             float(p.prbThreshold), float(p.trafficLambda), float(p.peakHourMultiplier)
@@ -100,53 +96,22 @@ class FiveGEnv(gym.Env):
                 *stats['rsrp_stats'], *stats['rsrq_stats'], *stats['sinr_stats'], float(power_ratio)
             ]
             start_idx = i * self.state_dim_per_cell
-            cell_features[start_idx:start_idx + self.state_dim_per_cell] = np.array(cell_feats_list, dtype=np.float32)
+            cell_features[start_idx:start_idx + self.state_dim_per_cell] = cell_feats_list
             
-        return np.concatenate([np.array(sim_features, dtype=np.float32), np.array(network_features, dtype=np.float32), cell_features]).astype(np.float32)
+        return np.concatenate([np.array(sim_features), np.array(network_features), cell_features]).astype(np.float32)
 
-def _get_ue_stats_for_cell(self, cell_id: int) -> Dict[str, Any]:
-    """Get UE statistics for a specific cell"""
-    # FIX: Add explicit check for is_dropped attribute
-    for ue in self.ues:
-        if not hasattr(ue, 'is_dropped'):
-            raise AttributeError(f"UE {ue.id} missing 'is_dropped' attribute!")
-    
-    ue_metrics = [
-        (ue.rsrp, ue.rsrq, ue.sinr, ue.traffic_demand) 
-        for ue in self.ues 
-        if ue.serving_cell == cell_id and not ue.is_dropped
-    ]
-    
-    if not ue_metrics:
-        return {
-            'active_sessions': 0.0, 
-            'total_traffic': 0.0, 
-            'rsrp_stats': [-140.0]*4, 
-            'rsrq_stats': [-20.0]*4, 
-            'sinr_stats': [-20.0]*4
-        }
-    
-    rsrps, rsrqs, sinrs, traffic = zip(*ue_metrics)
-    
-    def safe_stats(data, default_val):
-        arr = np.array(data, dtype=np.float32)
-        valid = arr[np.isfinite(arr)]
-        if valid.size > 0:
-            return [
-                float(np.mean(valid)), 
-                float(np.min(valid)), 
-                float(np.max(valid)), 
-                float(np.std(valid))
-            ]
-        return [default_val]*4
-    
-    return {
-        'active_sessions': float(len(ue_metrics)), 
-        'total_traffic': float(np.sum(traffic)),
-        'rsrp_stats': safe_stats(rsrps, -140.0), 
-        'rsrq_stats': safe_stats(rsrqs, -20.0), 
-        'sinr_stats': safe_stats(sinrs, -20.0)
-    }
+    def _get_ue_stats_for_cell(self, cell_id: int) -> Dict[str, Any]:
+        ue_metrics = [(ue.rsrp, ue.rsrq, ue.sinr, ue.traffic_demand) for ue in self.ues if ue.serving_cell == cell_id and not ue.is_dropped]
+        if not ue_metrics:
+            return {'active_sessions': 0.0, 'total_traffic': 0.0, 'rsrp_stats': [-140.0]*4, 'rsrq_stats': [-20.0]*4, 'sinr_stats': [-20.0]*4}
+        
+        rsrps, rsrqs, sinrs, traffic = zip(*ue_metrics)
+        def safe_stats(data, default):
+            arr = np.array([d for d in data if np.isfinite(d)], dtype=np.float32)
+            return [float(np.mean(arr)), float(np.min(arr)), float(np.max(arr)), float(np.std(arr))] if arr.size > 0 else [default]*4
+        
+        return {'active_sessions': float(len(ue_metrics)), 'total_traffic': float(np.sum(traffic)),
+                'rsrp_stats': safe_stats(rsrps, -140.0), 'rsrq_stats': safe_stats(rsrqs, -20.0), 'sinr_stats': safe_stats(sinrs, -20.0)}
 
     def compute_metrics(self) -> Dict[str, float]:
         if not self.cells: return {k: 0.0 for k in ["total_energy", "active_cells", "avg_drop_rate", "avg_latency", "total_traffic", "connected_ues", "connection_rate", "cpu_violations", "prb_violations", "max_cpu_usage", "max_prb_usage", "kpi_violations", "total_tx_power", "avg_power_ratio"]}
@@ -178,61 +143,21 @@ def _get_ue_stats_for_cell(self, cell_id: int) -> Dict[str, Any]:
         np.random.seed(self.seed)
         
         self.current_step = 0
-        self.qos_compliant_steps = 0
-        self.current_episode_reward = 0.0
-        self.reward_computer.reset()
-
-        
         self._setup_scenario(self.seed)
+        
+        # Ensure all UEs start in a non-dropped state
+        for ue in self.ues: ue.is_dropped = False
 
-        for ue in self.ues:
-            ue.is_dropped = False
-
-        self.ues, self.cells = run_simulation_step(self.ues, self.cells, self.sim_params, self.time_step_duration, -1, self.seed)
+        self.ues, self.cells = run_simulation_step(self.ues, self.cells, self.sim_params, self.sim_params.timeStep, -1, self.seed)
         return self._get_obs(), {}
 
-    def compute_reward(self, metrics: Dict[str, Any]) -> float:
-        return self.reward_computer.compute_reward(metrics, self.cells)
-    
     def step(self, action: np.ndarray) -> Tuple[np.ndarray, float, bool, bool, Dict[str, Any]]:
         active_action = action[:self.n_cells]
-        self.ues, self.cells = run_simulation_step(
-            self.ues, self.cells, self.sim_params, self.time_step_duration, 
-            self.current_step, self.seed, active_action
-        )
+        self.ues, self.cells = run_simulation_step(self.ues, self.cells, self.sim_params, self.sim_params.timeStep, self.current_step, self.seed, active_action)
         
         metrics = self.compute_metrics()
-        reward = self.compute_reward(metrics)
-        
-        self.current_episode_reward += reward
         self.current_step += 1
-        terminated = self.current_step >= self.max_time_steps
+        terminated = self.current_step >= self.sim_params.total_steps
         
-        if terminated:
-            self.total_episodes += 1
-            self._log_episode_summary()
-
-        return self._get_obs(), float(reward), bool(terminated), False, metrics
-
-    def _log_episode_summary(self):
-        stats = self.reward_computer.get_stats()
-        compliance_rate = stats['compliance_rate']
-        print(f"\n{'='*60}")
-        print(f"[EPISODE {self.total_episodes} COMPLETE]")
-        print(f"  - Total Reward: {self.current_episode_reward:.2f}")
-        print(f"  - Compliance Rate: {compliance_rate:.1f}%")
-        print(f"  - Compliant Steps: {stats['qos_compliant_steps']}")
-        print(f"  - Max Consecutive Violations: {stats['consecutive_violations']}")
-        print(f"{'='*60}\n")
-
-if __name__ == "__main__":
-    cfg = {'simTime': 500, 'numSites': 3, 'numUEs': 50, 'deploymentScenario': 'dense_urban', 'dropCallThreshold': 1.0, 'latencyThreshold': 50.0}
-    env = FiveGEnv(cfg, max_cells=12)
-    obs, _ = env.reset(seed=42)
-    done = False
-    for i in range(500):
-        action = env.action_space.sample()
-        obs, reward, done, _, info = env.step(action)
-        if i % 50 == 0:
-            print(f"Step: {i}, Reward: {reward:.3f}, Drop Rate: {info['avg_drop_rate']:.2f}%, Latency: {info['avg_latency']:.2f}ms")
-        if done: break
+        # Return a placeholder reward of 0.0. The wrapper will calculate the true reward.
+        return self._get_obs(), 0.0, terminated, False, metrics
