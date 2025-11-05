@@ -88,6 +88,68 @@ class LagrangianRewardWrapper(gym.Wrapper):
             if key in self.lambdas:
                 self.lambdas[key] = value
 
+#----------------CLAUDE----------------#
+class LagrangianCostWrapper(gym.Wrapper):
+    """
+    Wrapper that computes Lagrangian costs and adds them to info dict.
+    This allows AdamLambdaUpdateCallback to access costs without needing
+    to know internal environment structure.
+    """
+    
+    def __init__(self, env, constraint_thresholds: Dict[str, float]):
+        """
+        Args:
+            env: Base environment
+            constraint_thresholds: Thresholds for each constraint
+        """
+        super().__init__(env)
+        self.constraint_thresholds = constraint_thresholds
+        self.current_lambdas = {key: 1.0 for key in constraint_thresholds.keys()}
+    
+    def step(self, action):
+        """Execute step and compute Lagrangian costs."""
+        obs, reward, terminated, truncated, info = self.env.step(action)
+        
+        # Compute costs for each constraint
+        lagrangian_costs = {}
+        
+        # Get metrics (assumes env.compute_metrics() exists or metrics in info)
+        if hasattr(self.env, 'compute_metrics'):
+            metrics = self.env.compute_metrics()
+        else:
+            metrics = info
+        
+        # Compute violation costs
+        for key, threshold in self.constraint_thresholds.items():
+            if key in metrics:
+                metric_value = metrics[key]
+                # Cost = max(0, metric - threshold)
+                cost = max(0.0, metric_value - threshold)
+                lagrangian_costs[key] = cost
+        
+        # Add to info
+        info['lagrangian_costs'] = lagrangian_costs
+        
+        # Optionally modify reward with Lagrangian penalty
+        # reward = reward - sum(lambda * cost)
+        lagrangian_penalty = sum(
+            self.current_lambdas.get(key, 0.0) * cost
+            for key, cost in lagrangian_costs.items()
+        )
+        
+        info['lagrangian_penalty'] = lagrangian_penalty
+        info['original_reward'] = reward
+        
+        # Apply penalty to reward
+        reward = reward - lagrangian_penalty
+        
+        return obs, reward, terminated, truncated, info
+    
+    def update_lambdas(self, new_lambdas: Dict[str, float]):
+        """Update lambda values (called by callback)."""
+        self.current_lambdas.update(new_lambdas)
+
+
 class StrictConstraintWrapper(gym.Wrapper):
     """
     Zero reward if ANY constraint is violated.

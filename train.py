@@ -125,6 +125,11 @@ class TrainingPipeline:
             lagrangian_env = LagrangianRewardWrapper(base_env)
             monitored_env = Monitor(lagrangian_env)
             return monitored_env
+        def make_cost_lagrange_env():
+            base_env = FiveGEnv(env_config, self.config.max_cells)
+            cost_lagrangian_env = LagrangianCostWrapper(base_env)
+            monitored_env = Monitor(cost_lagrangian_env)
+            return monitored_env
         
         # Return appropriate environment factory
         if name_env == "her":
@@ -135,7 +140,9 @@ class TrainingPipeline:
             return _make_strict_constraint_env
         elif name_env == "lagrange":
             return make_lagrange_env
-    
+        elif name_env == "cost_lagrange":
+            return make_cost_lagrange_env
+
     def train(self, algorithm: str, total_timesteps: int, n_envs: int = 4, name_env: str = "default") -> BaseAlgorithm:
         """Execute the complete training pipeline."""
         print(f"🚀 Starting enhanced training with {algorithm.upper()}")
@@ -210,29 +217,39 @@ class TrainingPipeline:
         return scenarios
     
     def _setup_callbacks(self) -> List:
-        """Setup training callbacks."""
+        """Setup training `callbacks`."""
         eval_env = DummyVecEnv([self.create_environment({}, seed=999)])
+        vec_eval_env = VecNormalize(eval_env, norm_obs=True, norm_reward=True, clip_obs=10.0)
+
         callbacks = [
             CheckpointCallback(save_freq=50000, save_path='checkpoints/'),
-            FileLoggingCallback(log_path="training_log.log"),
+            MetricsLoggerCallback(verbose=1),
             LoggedEvalCallback(
-                eval_env=VecNormalize(eval_env, norm_obs=True, norm_reward=True, clip_obs=10.0),
+                eval_env=vec_eval_env,
                 best_model_save_path='best_models/',
                 log_path='eval_logs/',
                 eval_freq=10000,
             ),
             ConstraintMonitorCallback(verbose=1),
-            AdamLambdaUpdateCallback(
-                constraint_keys=self.config.constraint_keys,
-                lambda_lr=0.05,
-                update_freq=self.model.n_steps,
+            ClaudeAdamLambdaUpdateCallback(
+                constraint_keys=['avg_drop_rate', 'avg_latency', 'cpu_violations', 'prb_violations'],
+                constraint_thresholds={
+                    'avg_drop_rate': 1.0,
+                    'avg_latency': 50.0,
+                    'cpu_violations': 0.0,
+                    'prb_violations': 0.0
+                },
+                initial_lambda_value=10.0,
+                lambda_lr=0.01,
+                max_lambda=100.0,
+                update_freq=1000,
+                gradient_clip=5.0,
+                use_warmup=True,
+                warmup_steps=10000,
+                lr_decay=True,
+                verbose=1
             )
         ]
-
-        for callback in callbacks:
-            if hasattr(callback, 'logger'):
-                callback.logger = self.logger
-
         return callbacks
     
     def _save_model(self, model: BaseAlgorithm, algorithm: str):
