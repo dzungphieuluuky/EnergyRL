@@ -104,7 +104,7 @@ class TrainingPipeline:
                 'ent_coef': 'auto',
                 'gamma': 0.99,
                 'tau': 0.01,
-                'gradient_steps': 8,
+                'gradient_steps': 16,
                 'learning_starts': 20000,    # Reduced
                 'train_freq': 1,             # Update every step
                 'policy_kwargs': {
