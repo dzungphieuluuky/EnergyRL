@@ -116,20 +116,23 @@ class TrainingPipeline:
         }
         def _make_env() -> gym.Env:
             base_env = FiveGEnv(env_config, self.config.max_cells)
-            wrapped_env = create_environment_from_name.get(name_env, lambda x: x)(base_env)
+            wrapper_class = create_environment_from_name.get(name_env)
+            if wrapper_class:
+                wrapped_env = wrapper_class(base_env)
+            else:
+                wrapped_env = base_env # Default to base if name not found
             monitored_env = Monitor(wrapped_env)
             return monitored_env
         return _make_env
-    
-    def train(self, algorithm: str, total_timesteps: int, n_envs: int = 4, name_env: str = "default") -> BaseAlgorithm:
+
+    # --- CHANGE 1: Modified the 'train' method signature ---
+    def train(self, algorithm: str, total_timesteps: int, n_envs: int = 4, name_env: str = "default", load_model_path: Optional[str] = None) -> BaseAlgorithm:
         """Execute the complete training pipeline."""
         print(f"🚀 Starting enhanced training with {algorithm.upper()}")
         
-        # Load training scenarios
         scenarios = self._load_scenarios()
         self.logger.info(f"Loaded {len(scenarios)} training scenarios.")
 
-        # Create vectorized environment
         env_factories = [self.create_environment(scenarios[i % len(scenarios)], seed=i, name_env=name_env) 
                         for i in range(n_envs)]
         self.logger.info(f"Creating {n_envs} parallel environments.")
@@ -139,25 +142,35 @@ class TrainingPipeline:
         self.logger.info(f"Normalized observation: {vec_env.norm_obs}")
         self.logger.info(f"Normalized reward: {vec_env.norm_reward}")
         
-        # Create model
         model_class = {'ppo': PPO, 'sac': SAC, 'td3': TD3, 'ddpg': DDPG}[algorithm]
-        model = model_class("MlpPolicy", vec_env, **self.hyperparameters[algorithm])
+
+        # --- CHANGE 2: Added logic to load a model or create a new one ---
+        if load_model_path:
+            self.logger.info(f"💾 Loading pre-trained model from: {load_model_path}")
+            model = model_class.load(load_model_path, env=vec_env)
+            
+            stats_path = load_model_path.replace(".zip", "_vecnormalize.pkl")
+            if os.path.exists(stats_path):
+                self.logger.info(f"📊 Loading VecNormalize stats from: {stats_path}")
+                vec_env = VecNormalize.load(stats_path, vec_env)
+                vec_env.training = True
+            else:
+                self.logger.warning(f"⚠️ VecNormalize stats not found at {stats_path}. Model may underperform.")
+        else:
+            self.logger.info("🤖 Creating a new model from scratch.")
+            model = model_class("MlpPolicy", vec_env, **self.hyperparameters[algorithm])
+            
+            print("\n" + "="*50)
+            print("Applying custom policy initialization...")
+            bias_policy_output(model, bias_value=1.3)
+            print("="*50 + "\n")
+
         self.model = model
         self.logger.info(f"Initialized {algorithm.upper()} model.")
         self.logger.info(f"Model architecture:\n {model.policy}")
 
-        #------------Apply Bias Initialization------------#
-        print("\n" + "="*50)
-        print("Applying custom policy initialization...")
-
-        # Bias to 1.3 power per action in the final layer
-        bias_policy_output(model, bias_value=1.3)
-        print("="*50 + "\n")
-
-
-        #-----------------------------------------#
-        # Log hyperparameters in a readable format
         self.logger.info("Model hyperparameters:")
+        # ... (rest of the function is the same)
         for key, value in self.hyperparameters[algorithm].items():
             if key == 'device':
                 self.logger.info(f"  {key}: {value}")
@@ -169,28 +182,25 @@ class TrainingPipeline:
             else:
                 self.logger.info(f"  {key}: {value}")
 
-        # Setup callbacks
-        callbacks = self._setup_callbacks()
+        callbacks = self._setup_callbacks(load_model_path)
         self.logger.info(f"Using the following callbacks: {json.dumps([type(cb).__name__ for cb in callbacks], indent=4)}")
         
-        # Train model
-        self.logger.info("Number of timesteps: {}".format(total_timesteps))
         model.learn(
             total_timesteps=total_timesteps,
             callback=callbacks,
-            progress_bar=True
+            progress_bar=True,
+            reset_num_timesteps=not load_model_path # If loading, don't reset timestep count
         )
         
-        # Save final model
-        self._save_model(model, algorithm)
+        self._save_model(model, algorithm, vec_env)
         
         return model
     
     def _load_scenarios(self) -> List[Dict[str, Any]]:
         """Load training scenarios from configuration files."""
+        # ... (function is the same)
         scenario_folder = "scenarios/"
         scenarios = []
-        
         try:
             for filename in os.listdir(scenario_folder):
                 if filename.endswith('.json'):
@@ -201,19 +211,31 @@ class TrainingPipeline:
         except FileNotFoundError:
             print(f"⚠️  Scenario folder '{scenario_folder}' not found, using default")
             scenarios = [{'name': 'default', 'numUEs': 50, 'numSites': 3}]
-        
         return scenarios
     
-    def _setup_callbacks(self) -> List:
+    def _setup_callbacks(self, load_model_path: Optional[str] = None) -> List:
         """Setup training `callbacks`."""
-        eval_env = DummyVecEnv([self.create_environment({}, seed=999)])
-        vec_eval_env = VecNormalize(eval_env, norm_obs=True, norm_reward=True, clip_obs=10.0)
+        # ... (function is the same)
+        eval_env_factory = self.create_environment({}, seed=999)
+        eval_env = DummyVecEnv([eval_env_factory])
+        
+        # When loading a model, we must use the same normalization stats for the eval env
+        if load_model_path:
+            stats_path = load_model_path.replace(".zip", "_vecnormalize.pkl")
+            if os.path.exists(stats_path):
+                print(f"Loading VecNormalize stats for evaluation from {stats_path}")
+                eval_vec_env = VecNormalize.load(stats_path, eval_env)
+                eval_vec_env.training = False # Do not update stats during evaluation
+            else:
+                eval_vec_env = VecNormalize(eval_env, norm_obs=True, norm_reward=False, clip_obs=10.0)
+        else:
+            eval_vec_env = VecNormalize(eval_env, norm_obs=True, norm_reward=False, clip_obs=10.0)
 
         callbacks = [
             CheckpointCallback(save_freq=50000, save_path='checkpoints/'),
             MetricsLoggerCallback(verbose=1),
             LoggedEvalCallback(
-                eval_env=vec_eval_env,
+                eval_env=eval_vec_env,
                 best_model_save_path='best_models/',
                 log_path='eval_logs/',
                 eval_freq=10000,
@@ -222,15 +244,21 @@ class TrainingPipeline:
         ]
         return callbacks
     
-    def _save_model(self, model: BaseAlgorithm, algorithm: str):
-        """Save trained model with metadata."""
+    # --- CHANGE 3: Modified the '_save_model' method to also save VecNormalize stats ---
+    def _save_model(self, model: BaseAlgorithm, algorithm: str, vec_env: VecNormalize):
+        """Save trained model and VecNormalize stats."""
         timestamp = pd.Timestamp.now().strftime('%Y%m%d_%H%M%S')
         os.makedirs("trained_models/", exist_ok=True)
         model_path = f"trained_models/{algorithm}_final_{timestamp}.zip"
         model.save(model_path)
         print(f"💾 Model saved to: {model_path}")
-    
+
+        stats_path = model_path.replace(".zip", "_vecnormalize.pkl")
+        vec_env.save(stats_path)
+        print(f"📊 VecNormalize stats saved to: {stats_path}")
+
     def setup_logging(self, log_file):
+        # ... (function is the same)
         self.logger = logging.getLogger('RLAgentTraining')
         self.logger.setLevel(logging.INFO)
         if self.logger.hasHandlers(): self.logger.handlers.clear()
@@ -247,19 +275,27 @@ def main():
                        choices=['ppo', 'sac', 'td3', 'ddpg'], help="RL algorithm to use")
     parser.add_argument("--timesteps", "-t", type=int, default=1000000, help="Total training timesteps")
     parser.add_argument("--envs", "-e", type=int, default=4, help="Number of parallel environments")
-    parser.add_argument("--name_env", "-n", type=str, default="default", help="Environment type: 'default' or 'her'")
+    parser.add_argument("--name_env", "-n", type=str, default="gated", help="Environment wrapper to use")
+    
+    # --- CHANGE 4: Added the new command-line argument ---
+    parser.add_argument("--load-model", type=str, default=None, 
+                        help="Path to a pre-trained model to continue training from (e.g., 'best_models/best_model.zip')")
     
     args = parser.parse_args()
     
-    # Initialize training configuration
     config = TrainingConfig()
-    
-    # Create and execute training pipeline
     pipeline = TrainingPipeline(config)
 
-    # Display selected settings
     print("Algorithm selected:", args.algorithm.upper())
-    pipeline.train(args.algorithm, args.timesteps, args.envs, args.name_env)
+    
+    # --- CHANGE 5: Pass the new argument to the train method ---
+    pipeline.train(
+        algorithm=args.algorithm, 
+        total_timesteps=args.timesteps, 
+        n_envs=args.envs, 
+        name_env=args.name_env,
+        load_model_path=args.load_model
+    )
 
 
 if __name__ == "__main__":
