@@ -15,7 +15,6 @@ import numpy as np
 import argparse
 import gymnasium as gym
 import multiprocessing
-import torch_directml
 from typing import Callable, Dict, Any, List, Optional
 from dataclasses import dataclass
 from collections import defaultdict, deque
@@ -53,7 +52,7 @@ class TrainingConfig:
             self.constraint_keys = ['avg_drop_rate', 'avg_latency', 'cpu_violations', 'prb_violations']
         if self.device is None:
             self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-            
+
 class TrainingPipeline:
     """
     Comprehensive training pipeline with multiple improvement strategies.
@@ -105,7 +104,7 @@ class TrainingPipeline:
                 'ent_coef': 'auto',
                 'gamma': 0.99,
                 'tau': 0.01,
-                'gradient_steps': 18,
+                'gradient_steps': 8,
                 'learning_starts': 20000,    # Reduced
                 'train_freq': 1,             # Update every step
                 'policy_kwargs': {
