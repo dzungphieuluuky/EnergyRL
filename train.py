@@ -123,9 +123,9 @@ class TrainingPipeline:
         
         algorithm_params = {
             'ppo': {
-                'learning_rate': 3e-5,
-                'n_steps': 4096,
-                'batch_size': 256,
+                'learning_rate': 1e-5,
+                'n_steps': 8192,
+                'batch_size': 512,
                 'n_epochs': 20,
                 'gamma': 0.995,
                 'gae_lambda': 0.95,
@@ -192,8 +192,8 @@ class TrainingPipeline:
         print("\n" + "="*50)
         print("Applying custom policy initialization...")
 
-        # Bias to 1.1 power per action in the final layer
-        bias_policy_output(model, bias_value=1.1)
+        # Bias to 1.3 power per action in the final layer
+        bias_policy_output(model, bias_value=1.3)
         print("="*50 + "\n")
 
 
