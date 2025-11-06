@@ -81,17 +81,17 @@ class TrainingPipeline:
         
         algorithm_params = {
             'ppo': {
-                'learning_rate': 5e-6,
+                'learning_rate': 1e-6,
                 'n_steps': 8192,
                 'batch_size': 512,
-                'n_epochs': 10,
+                'n_epochs': 5,
                 'gamma': 0.995,
                 'gae_lambda': 0.92,
-                'clip_range': 0.2,
-                'ent_coef': 0.01,
+                'clip_range': 0.1,
+                'ent_coef': 0.001,
                 'vf_coef': 0.8,
                 'max_grad_norm': 0.5,
-                'target_kl': 0.02
+                'target_kl': 0.03
             },
             'sac': {
                 'learning_rate': 3e-4,
