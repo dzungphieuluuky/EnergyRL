@@ -321,3 +321,36 @@ def calculate_cell_latency(base_latency, load_ratio, num_ues,
         power_latency_penalty = (1.0 - power_ratio) * 3.0
     
     return latency + load_latency + ue_latency + power_latency_penalty
+
+@jit(nopython=True, cache=True)
+def get_num_cells_from_config(config_path: str) -> int:
+    """
+    Infers the total number of cells from a simulation configuration file.
+
+    Args:
+        config_path: Path to the JSON configuration file.
+
+    Returns:
+        The total number of cells, calculated as numSites * numSectors.
+    """
+    try:
+        with open(config_path, 'r') as f:
+            config = json.load(f)
+        
+        num_sites = config.get("numSites")
+        num_sectors = config.get("numSectors")
+        
+        if num_sites is None or num_sectors is None:
+            raise KeyError("Config file must contain 'numSites' and 'numSectors' keys.")
+            
+        return num_sites * num_sectors
+        
+    except FileNotFoundError:
+        print(f"Error: Configuration file not found at {config_path}")
+        raise
+    except json.JSONDecodeError:
+        print(f"Error: Could not decode JSON from {config_path}")
+        raise
+    except KeyError as e:
+        print(f"Error: Missing key in configuration file: {e}")
+        raise

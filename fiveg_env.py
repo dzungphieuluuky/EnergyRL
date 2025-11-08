@@ -4,6 +4,7 @@ import gymnasium as gym
 from gymnasium import spaces
 from typing import List, Tuple, Dict, Any, Optional
 
+from numba_utils import *
 from fiveg_objects import Cell, UE, SimulationParams
 from simulation_logic import (
     update_ue_mobility, update_signal_measurements, check_handover_events,
@@ -54,8 +55,8 @@ class FiveGEnv(gym.Env):
         
         self.cells: List[Cell] = []
         self.ues: List[UE] = []
-        self.n_cells = 0
-        self.n_ues = 0
+        self.n_cells = env_config.get('numSites', 0) * env_config.get('numSectors', 0)
+        self.n_ues = env_config.get('numUEs', 0)
         self.current_step = 0
 
     def _setup_scenario(self, seed: int):
