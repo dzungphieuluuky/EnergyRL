@@ -1,4 +1,4 @@
-# ⚡ energy-simulation 🔋
+# ⚡ EnergyRL 🔋
 
 A Reinforcement Learning project leveraging **Stable-Baselines3** to optimize energy efficiency in realistic **5G network management**.
 
